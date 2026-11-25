@@ -173,9 +173,9 @@ BIZJET_CODES = {
 }
 
 
-def beijing_sunrise_sunset(dt_cst: datetime) -> tuple[datetime, datetime]:
-    day_of_year = dt_cst.timetuple().tm_yday
-    lat_rad = math.radians(BEIJING_LAT)
+def airport_sunrise_sunset(dt_local: datetime, lat: float = BEIJING_LAT, lon: float = BEIJING_LON) -> tuple[datetime, datetime]:
+    day_of_year = dt_local.timetuple().tm_yday
+    lat_rad = math.radians(lat)
     gamma = 2.0 * math.pi / 365.0 * (day_of_year - 1)
     eqtime = 229.18 * (
         0.000075
@@ -198,13 +198,19 @@ def beijing_sunrise_sunset(dt_cst: datetime) -> tuple[datetime, datetime]:
     )
     cos_ha = max(-1.0, min(1.0, cos_ha))
     ha_deg = math.degrees(math.acos(cos_ha))
-    sunrise_utc_min = 720.0 - 4.0 * (BEIJING_LON + ha_deg) - eqtime
-    sunset_utc_min = 720.0 - 4.0 * (BEIJING_LON - ha_deg) - eqtime
-    midnight_cst = dt_cst.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=CST)
+    sunrise_utc_min = 720.0 - 4.0 * (lon + ha_deg) - eqtime
+    sunset_utc_min = 720.0 - 4.0 * (lon - ha_deg) - eqtime
+    tz = dt_local.tzinfo or CST
+    tz_offset_min = (tz.utcoffset(dt_local) or timedelta(hours=8)).total_seconds() / 60.0
+    midnight_local = dt_local.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=tz)
     return (
-        midnight_cst + timedelta(minutes=sunrise_utc_min + 480.0),
-        midnight_cst + timedelta(minutes=sunset_utc_min + 480.0),
+        midnight_local + timedelta(minutes=sunrise_utc_min + tz_offset_min),
+        midnight_local + timedelta(minutes=sunset_utc_min + tz_offset_min),
     )
+
+
+def beijing_sunrise_sunset(dt_cst: datetime) -> tuple[datetime, datetime]:
+    return airport_sunrise_sunset(dt_cst, BEIJING_LAT, BEIJING_LON)
 
 
 def fetch_page(airport_code: str, timestamp: int, page: int, limit: int = 100) -> dict:
@@ -235,7 +241,7 @@ def fetch_page(airport_code: str, timestamp: int, page: int, limit: int = 100) -
     return {}
 
 
-def parse_flight(entry: dict, airport_code: str) -> dict | None:
+def parse_flight(entry: dict, airport_code: str, local_tz: timezone = CST) -> dict | None:
     f = entry.get("flight") or {}
     time_info = f.get("time") or {}
     arr_ts = (time_info.get("scheduled") or {}).get("arrival") or (time_info.get("estimated") or {}).get("arrival")
@@ -270,7 +276,7 @@ def parse_flight(entry: dict, airport_code: str) -> dict | None:
     if fix:
         airline_name, airline_iata, airline_icao = fix
 
-    arr_dt = datetime.fromtimestamp(arr_ts, tz=CST)
+    arr_dt = datetime.fromtimestamp(arr_ts, tz=local_tz)
     return {
         "airport": airport_code.upper(),
         "arrival_ts": arr_ts,
@@ -293,7 +299,11 @@ def parse_flight(entry: dict, airport_code: str) -> dict | None:
 
 
 def fetch_airport_for_date(airport_code: str, target_date: datetime) -> dict:
-    start_dt = target_date.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=CST)
+    # First probe page 1 to discover airport's exact lat/lon & timezone offset for local sunrise/sunset
+    lat, lon, tz_offset_sec = BEIJING_LAT, BEIJING_LON, 28800
+    airport_name = zh_origin(airport_code.upper())
+    local_tz = CST
+    start_dt = target_date.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=local_tz)
     end_dt = start_dt + timedelta(days=1) - timedelta(seconds=1)
     start_ts = int(start_dt.timestamp())
     end_ts = int(end_dt.timestamp())
@@ -303,6 +313,7 @@ def fetch_airport_for_date(airport_code: str, target_date: datetime) -> dict:
     flights = []
     errors = []
     max_seen_ts = 0
+    meta_loaded = False
 
     for anchor in anchor_timestamps:
         if max_seen_ts >= end_ts:
@@ -316,6 +327,8 @@ def fetch_airport_for_date(airport_code: str, target_date: datetime) -> dict:
                 if "403" in str(exc):
                     return {
                         "airport": airport_code.upper(),
+                        "airport_name": airport_name,
+                        "lat": lat, "lon": lon, "tz_offset_sec": tz_offset_sec,
                         "date": start_dt.strftime("%Y-%m-%d"),
                         "total_flights": 0,
                         "first_arrival": None,
@@ -325,7 +338,23 @@ def fetch_airport_for_date(airport_code: str, target_date: datetime) -> dict:
                     }
                 break
             try:
-                arrivals = payload["result"]["response"]["airport"]["pluginData"]["schedule"]["arrivals"]
+                plugin_data = payload["result"]["response"]["airport"]["pluginData"]
+                if not meta_loaded:
+                    details = plugin_data.get("details") or {}
+                    pos = details.get("position") or {}
+                    if pos.get("latitude") is not None and pos.get("longitude") is not None:
+                        lat = float(pos["latitude"])
+                        lon = float(pos["longitude"])
+                    tz_info = details.get("timezone") or {}
+                    if tz_info.get("offset") is not None:
+                        tz_offset_sec = int(tz_info["offset"])
+                        local_tz = timezone(timedelta(seconds=tz_offset_sec))
+                        start_dt = target_date.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=local_tz)
+                        end_dt = start_dt + timedelta(days=1) - timedelta(seconds=1)
+                        start_ts = int(start_dt.timestamp())
+                        end_ts = int(end_dt.timestamp())
+                    meta_loaded = True
+                arrivals = plugin_data["schedule"]["arrivals"]
             except (KeyError, TypeError):
                 break
             rows = arrivals.get("data") or []
@@ -335,7 +364,7 @@ def fetch_airport_for_date(airport_code: str, target_date: datetime) -> dict:
             page_min_ts = None
             page_max_ts = None
             for row in rows:
-                parsed = parse_flight(row, airport_code)
+                parsed = parse_flight(row, airport_code, local_tz)
                 if not parsed:
                     continue
                 ts = parsed["arrival_ts"]
@@ -357,6 +386,10 @@ def fetch_airport_for_date(airport_code: str, target_date: datetime) -> dict:
     flights.sort(key=lambda x: x["arrival_ts"])
     return {
         "airport": airport_code.upper(),
+        "airport_name": airport_name,
+        "lat": lat,
+        "lon": lon,
+        "tz_offset_sec": tz_offset_sec,
         "date": start_dt.strftime("%Y-%m-%d"),
         "total_flights": len(flights),
         "first_arrival": flights[0]["arrival_time"] if flights else None,
@@ -444,6 +477,10 @@ def analyze_flights(airport_result: dict) -> dict:
 
     return {
         "airport": airport_result["airport"],
+        "airport_name": airport_result.get("airport_name") or zh_origin(airport_result["airport"]),
+        "lat": airport_result.get("lat", BEIJING_LAT),
+        "lon": airport_result.get("lon", BEIJING_LON),
+        "tz_offset_sec": airport_result.get("tz_offset_sec", 28800),
         "date": airport_result["date"],
         "total_flights": airport_result["total_flights"],
         "first_arrival": airport_result["first_arrival"],
@@ -459,19 +496,64 @@ def analyze_flights(airport_result: dict) -> dict:
     }
 
 
+# Ultra-special targets that ALWAYS stay in the main section regardless of sunrise/sunset
+ULTRA_SPECIAL_TYPES = {
+    "A124", "A225", "IL96", "IL62", "MD11", "DC10", "B74S", "B742", "B743",
+    "A345", "A346", "A3ST", "A337", "BLCF", "C5M", "C5", "C17", "VC25", "E4B", "C32A", "E3CF", "B703",
+}
+ULTRA_VIP_CALLSIGN_PREFIXES = (
+    "AF1", "AF2", "AIRFORCE1", "EXEC1", "SAM", "VENUS", "RSD", "GAF", "COTAM",
+    "JPN001", "JPN002", "JF001", "JF002", "KAF001", "KAF002", "KRH", "RRR",
+    "CFC01", "SUI", "AME", "IAM", "FAB01", "ASY",
+    "CCA001", "CCA002", "CCA003", "CCA004", "CCA005", "CCA006", "CCA007", "CCA008", "CCA009",
+)
+ULTRA_VIP_REGS = {"B-2479", "82-8000", "92-9000", "73-1676", "73-1677", "74-0787", "75-0125"}
+
+
+def is_ultra_special(f: dict) -> bool:
+    cs = (f.get("callsign") or "").upper()
+    reg = (f.get("registration") or "").upper()
+    ac = (f.get("aircraft_code") or "").upper()
+    return (
+        ac in ULTRA_SPECIAL_TYPES
+        or reg in ULTRA_VIP_REGS
+        or any(cs.startswith(p) for p in ULTRA_VIP_CALLSIGN_PREFIXES)
+    )
+
+
+def split_by_daylight(items: list[dict], win_start: datetime, win_end: datetime) -> tuple[list[dict], list[dict]]:
+    """Split items into (main_shootable_or_ultra, dark_filtered_reference)."""
+    main_list, dark_list = [], []
+    for f in items:
+        arr_dt = datetime.fromtimestamp(f["arrival_ts"], tz=CST)
+        if (win_start < arr_dt < win_end) or is_ultra_special(f):
+            main_list.append(f)
+        else:
+            dark_list.append(f)
+    return main_list, dark_list
+
+
 def esc(s: str) -> str:
     return html.escape(str(s or ""))
 
 
-def render_rows(items: list[dict], win_start: datetime, win_end: datetime, empty_msg: str) -> str:
+def render_rows(items: list[dict], win_start: datetime, win_end: datetime, empty_msg: str, muted: bool = False) -> str:
     if not items:
         return f'<tr><td colspan="5" style="border:1px solid #e2e8f0;padding:10px;color:#64748b;text-align:center;">{esc(empty_msg)}</td></tr>'
     out = []
     for f in items:
         arr_dt = datetime.fromtimestamp(f["arrival_ts"], tz=CST)
         shootable = win_start < arr_dt < win_end
-        bg = "#fefce8" if shootable else "#ffffff"
-        light_tag = ' <span style="font-size:11px;color:#b45309;">☀可拍</span>' if shootable else ""
+        ultra = is_ultra_special(f)
+        if muted:
+            bg = "#f8fafc"
+            tag = ' <span style="font-size:11px;color:#64748b;">🌙夜间</span>'
+        elif ultra and not shootable:
+            bg = "#fef2f2"
+            tag = ' <span style="font-size:11px;color:#b91c1c;">🚨直通</span>'
+        else:
+            bg = "#fefce8"
+            tag = ' <span style="font-size:11px;color:#b45309;">☀可拍</span>'
         flt = f["flight_number"] or f["callsign"] or "N/A"
         reg_html = f'<br><span style="color:#2563eb;">{esc(f["registration"])}</span>' if f["registration"] else ""
         ac_disp = zh_aircraft(f["aircraft_text"], f["aircraft_code"])
@@ -479,7 +561,7 @@ def render_rows(items: list[dict], win_start: datetime, win_end: datetime, empty
         orig_disp = zh_origin(f["origin_iata"], f["origin_city"], f["origin_country"])
         out.append(f"""
         <tr style="background-color:{bg};">
-          <td style="border:1px solid #e2e8f0;padding:7px;white-space:nowrap;"><strong>{esc(f['arrival_time'])}</strong>{light_tag}</td>
+          <td style="border:1px solid #e2e8f0;padding:7px;white-space:nowrap;"><strong>{esc(f['arrival_time'])}</strong>{tag}</td>
           <td style="border:1px solid #e2e8f0;padding:7px;"><strong>{esc(flt)}</strong></td>
           <td style="border:1px solid #e2e8f0;padding:7px;">{esc(airline_disp)}<br><span style="color:#64748b;font-size:12px;">{esc(orig_disp)}</span></td>
           <td style="border:1px solid #e2e8f0;padding:7px;">{esc(ac_disp)}{reg_html}</td>
@@ -503,25 +585,37 @@ def merge_highlights(ap_data: dict) -> list[dict]:
     return sorted(merged.values(), key=lambda x: x["arrival_ts"])
 
 
-def build_html(summary: dict, target_dt: datetime) -> str:
-    sunrise, sunset = beijing_sunrise_sunset(target_dt)
+def merge_dark_reference(dark_by_airport: list[tuple[str, list[dict]]]) -> list[dict]:
+    """Combine all dark-hour filtered flights (liveries + highlights) across all airports."""
+    merged = {}
+    for ap_tag, items in dark_by_airport:
+        for f in items:
+            k = (ap_tag, f["flight_number"] or f["callsign"], f["arrival_ts"])
+            if k not in merged:
+                merged[k] = {
+                    **f,
+                    "flight_number": f"[{ap_tag}] {f['flight_number'] or f['callsign'] or 'N/A'}",
+                    "reasons": list(f["reasons"]),
+                }
+            else:
+                for r in f["reasons"]:
+                    if r not in merged[k]["reasons"]:
+                        merged[k]["reasons"].append(r)
+    return sorted(merged.values(), key=lambda x: x["arrival_ts"])
+
+
+def build_html(summary: dict, target_dt: datetime, edition_label: str = "次日亮点与彩绘到港汇总") -> str:
+    airports = summary["airports"]
+    codes = list(airports.keys())
+    first_ap = airports[codes[0]]
+    local_tz = timezone(timedelta(seconds=first_ap.get("tz_offset_sec", 28800)))
+    sunrise, sunset = airport_sunrise_sunset(
+        target_dt.replace(tzinfo=local_tz),
+        first_ap.get("lat", BEIJING_LAT),
+        first_ap.get("lon", BEIJING_LON),
+    )
     win_start = sunrise - timedelta(hours=1)
     win_end = sunset + timedelta(hours=1)
-    pek = summary["airports"]["PEK"]
-    pkx = summary["airports"]["PKX"]
-
-    pek_liv = pek["special_liveries"]
-    pkx_liv = pkx["special_liveries"]
-    pek_hi = merge_highlights(pek)
-    pkx_hi = merge_highlights(pkx)
-
-    c919_note = (
-        f"PEK 明日共 {pek['c919_count']} 班 C919"
-        + (f"（亮点：{'、'.join(pek['c919_highlights'])}）" if pek["c919_highlights"] else "")
-        + f"；PKX 共 {pkx['c919_count']} 班 C919"
-        + (f"（亮点：{'、'.join(pkx['c919_highlights'])}）" if pkx["c919_highlights"] else "")
-        + "。"
-    )
 
     thead_livery = """
       <thead>
@@ -537,59 +631,94 @@ def build_html(summary: dict, target_dt: datetime) -> str:
       <thead>
         <tr style="background-color:#f1f5f9;color:#0f172a;">
           <th style="border:1px solid #cbd5e1;padding:7px;text-align:left;width:86px;">预计到达</th>
-          <th style="border:1px solid #cbd5e1;padding:7px;text-align:left;width:76px;">航班号</th>
+          <th style="border:1px solid #cbd5e1;padding:7px;text-align:left;width:88px;">航班号</th>
           <th style="border:1px solid #cbd5e1;padding:7px;text-align:left;">航司 / 出发地</th>
           <th style="border:1px solid #cbd5e1;padding:7px;text-align:left;">机型 / 注册号</th>
           <th style="border:1px solid #cbd5e1;padding:7px;text-align:left;">亮点说明</th>
         </tr>
       </thead>"""
 
+    livery_sections = []
+    highlight_sections = []
+    dark_by_airport = []
+    scan_stats = []
+    livery_stats = []
+    c919_parts = []
+
+    for code in codes:
+        ap = airports[code]
+        ap_name = ap.get("airport_name") or zh_origin(code)
+        ap_tz = timezone(timedelta(seconds=ap.get("tz_offset_sec", 28800)))
+        ap_sr, ap_ss = airport_sunrise_sunset(
+            target_dt.replace(tzinfo=ap_tz),
+            ap.get("lat", BEIJING_LAT),
+            ap.get("lon", BEIJING_LON),
+        )
+        ap_ws, ap_we = ap_sr - timedelta(hours=1), ap_ss + timedelta(hours=1)
+
+        liv_main, liv_dark = split_by_daylight(ap["special_liveries"], ap_ws, ap_we)
+        hi_main, hi_dark = split_by_daylight(merge_highlights(ap), ap_ws, ap_we)
+        dark_by_airport.append((code, liv_dark + hi_dark))
+
+        scan_stats.append(f"{code} {ap['total_flights']} 班")
+        livery_stats.append(f"{code} {len(liv_main)} 班")
+        if ap.get("c919_count"):
+            c919_parts.append(
+                f"{code} 共 {ap['c919_count']} 班 C919"
+                + (f"（亮点：{'、'.join(ap['c919_highlights'])}）" if ap.get("c919_highlights") else "")
+            )
+
+        livery_sections.append(f"""
+    <h4 style="margin:12px 0 6px 0;color:#0f172a;">📍 {esc(ap_name)} 可拍时段彩绘（{len(liv_main)} 班）</h4>
+    <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:14px;">
+      {thead_livery}
+      <tbody>{render_rows(liv_main, ap_ws, ap_we, f'可拍时段内暂未检出已排机 {code} 彩绘')}</tbody>
+    </table>""")
+
+        highlight_sections.append(f"""
+    <h3 style="margin:18px 0 8px 0;color:#0f172a;">🛬 {esc(ap_name)} 专机 / 特殊机型 / 罕见航司（{len(hi_main)} 班）</h3>
+    <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:18px;">
+      {thead_std}
+      <tbody>{render_rows(hi_main, ap_ws, ap_we, f'可拍时段内 {code} 暂无额外特殊机型或低频航司')}</tbody>
+    </table>""")
+
+    dark_ref = merge_dark_reference(dark_by_airport)
+    title_codes = " / ".join(codes)
+    c919_html = f"<strong>国产 C919 概览：</strong>{esc('；'.join(c919_parts))}。<br>" if c919_parts else ""
+
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><title>北京机场(PEK/PKX)次日亮点与彩绘到港汇总 - {summary['target_date']}</title></head>
+<head><meta charset="utf-8"><title>机场({title_codes}){edition_label} - {summary['target_date']}</title></head>
 <body style="font-family:'Microsoft YaHei','PingFang SC',Arial,sans-serif;color:#1f2937;line-height:1.6;max-width:860px;margin:0 auto;padding:18px;background:#f8fafc;">
   <div style="background:#ffffff;border-radius:10px;padding:24px;border:1px solid #e2e8f0;">
     <h2 style="margin:0 0 8px 0;color:#0f172a;border-bottom:2px solid #2563eb;padding-bottom:10px;">
-      ✈️ 北京机场（PEK / PKX）次日亮点与彩绘到港汇总
+      ✈️ 机场（{esc(title_codes)}）{esc(edition_label)}
     </h2>
     <p style="margin:6px 0 16px 0;color:#475569;font-size:13px;">
-      <strong>目标日期：</strong>{summary['target_date']}（北京时间） &nbsp;|&nbsp;
-      <strong>扫描规模：</strong>PEK {pek['total_flights']} 班 / PKX {pkx['total_flights']} 班 &nbsp;|&nbsp;
-      <strong>北京日出/日落：</strong>{sunrise.strftime('%H:%M')} / {sunset.strftime('%H:%M')}（☀淡黄高亮为可拍窗口 {win_start.strftime('%H:%M')}–{win_end.strftime('%H:%M')}）
+      <strong>目标日期：</strong>{summary['target_date']}（当地时间） &nbsp;|&nbsp;
+      <strong>扫描规模：</strong>{' / '.join(scan_stats)} &nbsp;|&nbsp;
+      <strong>当地日出/日落：</strong>{sunrise.strftime('%H:%M')} / {sunset.strftime('%H:%M')}（主区仅展示可拍窗口 <strong>{win_start.strftime('%H:%M')}–{win_end.strftime('%H:%M')}</strong> 及 🚨24h直通目标）
     </p>
 
     <div style="background:#fdf2f8;border-left:4px solid #db2777;padding:10px 14px;border-radius:4px;margin-bottom:12px;">
-      <h3 style="margin:0 0 2px 0;font-size:15px;color:#9d174d;">🎨 明日彩绘与特别涂装专栏（PEK {len(pek_liv)} 班 / PKX {len(pkx_liv)} 班）</h3>
-      <p style="margin:0;font-size:12px;color:#831843;">基于 FR24 实时涂装标注与常见彩绘库；部分次日航班将在明早起飞前排机，若有临期新增彩绘将由实时预警自动补推。</p>
+      <h3 style="margin:0 0 2px 0;font-size:15px;color:#9d174d;">🎨 可拍时段彩绘与特别涂装全览（{' / '.join(livery_stats)}）</h3>
+      <p style="margin:0;font-size:12px;color:#831843;">所有已排机彩绘全部如实列出、不做重要性删减；尚未在 FR24 分配注册号的航班起飞前如上线彩绘，将由实时预警自动补推。</p>
     </div>
 
-    <h4 style="margin:12px 0 6px 0;color:#0f172a;">📍 首都机场（PEK）彩绘与特别涂装</h4>
-    <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:14px;">
-      {thead_livery}
-      <tbody>{render_rows(pek_liv, win_start, win_end, '目前 FR24 尚未排定明日 PEK 彩绘注册号')}</tbody>
-    </table>
+    {''.join(livery_sections)}
+    {''.join(highlight_sections)}
 
-    <h4 style="margin:12px 0 6px 0;color:#0f172a;">📍 大兴机场（PKX）彩绘与特别涂装</h4>
-    <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:20px;">
-      {thead_livery}
-      <tbody>{render_rows(pkx_liv, win_start, win_end, '目前 FR24 尚未排定明日 PKX 彩绘注册号')}</tbody>
-    </table>
+    <div style="border-top:2px dashed #cbd5e1;padding-top:14px;margin-top:8px;">
+      <h3 style="margin:0 0 6px 0;font-size:14px;color:#475569;">🌙 夜间被过滤参考区（{win_start.strftime('%H:%M')} 前或 {win_end.strftime('%H:%M')} 后 · 共 {len(dark_ref)} 班）</h3>
+      <p style="margin:0 0 10px 0;font-size:12px;color:#64748b;">以下航班落于暗光时段（常规不建议拍机），单独归档在此供查漏参考；MD-11/DC-10/AF1/IL-96/AN-124 等直通目标不受此过滤。</p>
+      <table style="width:100%;border-collapse:collapse;font-size:12px;color:#475569;">
+        {thead_std}
+        <tbody>{render_rows(dark_ref, win_start, win_end, '夜间时段无额外亮点航班', muted=True)}</tbody>
+      </table>
+    </div>
 
-    <h3 style="margin:18px 0 8px 0;color:#0f172a;">🛬 首都机场（PEK）专机 / 特殊机型 / 罕见航司（{len(pek_hi)} 班）</h3>
-    <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:18px;">
-      {thead_std}
-      <tbody>{render_rows(pek_hi, win_start, win_end, '明日 PEK 暂无额外筛选出的特殊机型或低频航司')}</tbody>
-    </table>
-
-    <h3 style="margin:18px 0 8px 0;color:#0f172a;">🛬 大兴机场（PKX）专机 / 特殊机型 / 罕见航司（{len(pkx_hi)} 班）</h3>
-    <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:14px;">
-      {thead_std}
-      <tbody>{render_rows(pkx_hi, win_start, win_end, '明日 PKX 暂无额外筛选出的特殊机型或低频航司')}</tbody>
-    </table>
-
-    <p style="font-size:12px;color:#475569;background:#f8fafc;padding:10px 12px;border-radius:6px;margin:12px 0 0 0;">
-      <strong>国产 C919 概览：</strong>{esc(c919_note)}<br>
-      <strong>提示：</strong>本邮件由云端自动生成，外事访问新闻总结将在你上线 Antigravity 时由本地 AI 单独补充发送。实际拍机前请核对实时排机。
+    <p style="font-size:12px;color:#475569;background:#f8fafc;padding:10px 12px;border-radius:6px;margin:14px 0 0 0;">
+      {c919_html}<strong>提示：</strong>外事访问新闻总结将在你上线 Antigravity 时由本地 AI 单独补充发送；出差想看其他城市机场，可在 GitHub Actions 手动运行填入任意机场三字码（如 PVG,SHA）。
     </p>
   </div>
 </body>
@@ -623,8 +752,9 @@ def send_smtp(subject: str, html_body: str, config_path: str | None = None) -> N
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Daily Beijing PEK/PKX Arrivals & Liveries Digest")
-    parser.add_argument("--date", help="Target date YYYY-MM-DD (Beijing time). Defaults to tomorrow.")
+    parser = argparse.ArgumentParser(description="Daily Airport Arrivals & Liveries Digest")
+    parser.add_argument("--airports", default=os.environ.get("TARGET_AIRPORTS") or "PEK,PKX", help="Comma-separated IATA codes (e.g. PEK,PKX or PVG,SHA)")
+    parser.add_argument("--date", help="Target date YYYY-MM-DD. Defaults to today if before 12:00 CST, else tomorrow.")
     parser.add_argument("--state-dir", default="state", help="Directory to save arrivals.json for live alert dedup")
     parser.add_argument("--html-out", help="Optional path to save generated HTML")
     parser.add_argument("--smtp-config", help="Optional local smtp_config.json fallback")
@@ -632,44 +762,55 @@ def main() -> int:
     args = parser.parse_args()
 
     sys.stdout.reconfigure(encoding="utf-8")
+    airport_codes = [c.strip().upper() for c in (args.airports or "PEK,PKX").split(",") if c.strip()]
+    if not airport_codes:
+        airport_codes = ["PEK", "PKX"]
+
+    now_cst = datetime.now(CST)
     if args.date:
         target_dt = datetime.strptime(args.date, "%Y-%m-%d").replace(tzinfo=CST)
+        edition_label = "当日早报补扫" if target_dt.date() == now_cst.date() else "亮点与彩绘到港汇总"
+    elif now_cst.hour < 12:
+        target_dt = now_cst.replace(hour=0, minute=0, second=0, microsecond=0)
+        edition_label = "当日早报补扫"
     else:
-        target_dt = (datetime.now(CST) + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        target_dt = (now_cst + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        edition_label = "次日亮点与彩绘到港汇总"
 
     summary = {
-        "generated_at_cst": datetime.now(CST).strftime("%Y-%m-%d %H:%M:%S +08:00"),
+        "generated_at_cst": now_cst.strftime("%Y-%m-%d %H:%M:%S +08:00"),
         "target_date": target_dt.strftime("%Y-%m-%d"),
         "airports": {},
     }
-    for code in ("PEK", "PKX"):
+    for code in airport_codes:
         raw = fetch_airport_for_date(code, target_dt)
         summary["airports"][code] = analyze_flights(raw)
 
     os.makedirs(args.state_dir, exist_ok=True)
-    arrivals_path = os.path.join(args.state_dir, "arrivals.json")
-    with open(arrivals_path, "w", encoding="utf-8") as fh:
-        json.dump(summary, fh, ensure_ascii=False, indent=2)
+    # Only overwrite Beijing dedup state when running for PEK/PKX
+    if set(airport_codes) & {"PEK", "PKX"}:
+        arrivals_path = os.path.join(args.state_dir, "arrivals.json")
+        with open(arrivals_path, "w", encoding="utf-8") as fh:
+            json.dump(summary, fh, ensure_ascii=False, indent=2)
 
-    html_body = build_html(summary, target_dt)
+    html_body = build_html(summary, target_dt, edition_label=edition_label)
     if args.html_out:
         os.makedirs(os.path.dirname(os.path.abspath(args.html_out)), exist_ok=True)
         with open(args.html_out, "w", encoding="utf-8") as fh:
             fh.write(html_body)
 
-    pek = summary["airports"]["PEK"]
-    pkx = summary["airports"]["PKX"]
-    print(
-        f"Date={summary['target_date']} | "
-        f"PEK={pek['total_flights']} (livery={len(pek['special_liveries'])}, special={len(pek['special_aircraft'])}) | "
-        f"PKX={pkx['total_flights']} (livery={len(pkx['special_liveries'])}, special={len(pkx['special_aircraft'])})"
+    stats = " | ".join(
+        f"{c}={summary['airports'][c]['total_flights']} (livery={len(summary['airports'][c]['special_liveries'])})"
+        for c in airport_codes
     )
+    print(f"Date={summary['target_date']} ({edition_label}) | {stats}")
 
     if args.dry_run:
         print("DRY_RUN: Email skipped.")
         return 0
 
-    subject = f"北京机场(PEK/PKX)次日亮点与彩绘到港汇总 - {summary['target_date']}"
+    codes_str = "/".join(airport_codes)
+    subject = f"机场({codes_str}){edition_label} - {summary['target_date']}"
     send_smtp(subject, html_body, args.smtp_config)
     return 0
 
