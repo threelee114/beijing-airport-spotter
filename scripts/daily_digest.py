@@ -751,10 +751,59 @@ def send_smtp(subject: str, html_body: str, config_path: str | None = None) -> N
     print(f"DAILY_DIGEST_SENT_OK: {subject} -> {recipient}")
 
 
+def load_previous_sent_keys(arrivals_path: str, target_date: str) -> set[tuple[str, str, str]]:
+    """Load (airport, flight_number, registration) already reported in last evening's digest for target_date."""
+    keys = set()
+    if not os.path.exists(arrivals_path):
+        return keys
+    try:
+        with open(arrivals_path, "r", encoding="utf-8") as fh:
+            prev = json.load(fh)
+        if prev.get("target_date") != target_date:
+            return keys
+        for code, ap in (prev.get("airports") or {}).items():
+            for cat in ("special_liveries", "vip_or_unusual", "special_aircraft", "intl_cargo", "rare_airlines"):
+                for f in ap.get(cat) or []:
+                    flt = (f.get("flight_number") or f.get("callsign") or "").upper()
+                    reg = (f.get("registration") or "").upper()
+                    keys.add((code.upper(), flt, reg))
+    except Exception:
+        pass
+    return keys
+
+
+def filter_summary_diff(summary: dict, prev_keys: set[tuple[str, str, str]], min_hour: int | None = None) -> tuple[dict, int]:
+    """Keep only newly discovered / newly assigned flights not in prev_keys (and >= min_hour if set)."""
+    new_summary = {**summary, "airports": {}}
+    new_count = 0
+    for code, ap in summary["airports"].items():
+        new_ap = {**ap}
+        ap_tz = timezone(timedelta(seconds=ap.get("tz_offset_sec", 28800)))
+        ap_seen = set()
+        for cat in ("special_liveries", "vip_or_unusual", "special_aircraft", "intl_cargo", "rare_airlines"):
+            kept = []
+            for f in ap.get(cat) or []:
+                if min_hour is not None:
+                    arr_local = datetime.fromtimestamp(f["arrival_ts"], tz=ap_tz)
+                    if arr_local.hour < min_hour:
+                        continue
+                flt = (f.get("flight_number") or f.get("callsign") or "").upper()
+                reg = (f.get("registration") or "").upper()
+                if (not prev_keys) or ((code.upper(), flt, reg) not in prev_keys):
+                    kept.append(f)
+                    ap_seen.add((flt, reg, f.get("arrival_ts")))
+            new_ap[cat] = kept
+        new_count += len(ap_seen)
+        new_summary["airports"][code] = new_ap
+    return new_summary, new_count
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Daily Airport Arrivals & Liveries Digest")
     parser.add_argument("--airports", default=os.environ.get("TARGET_AIRPORTS") or "PEK,PKX", help="Comma-separated IATA codes (e.g. PEK,PKX or PVG,SHA)")
     parser.add_argument("--date", help="Target date YYYY-MM-DD. Defaults to today if before 12:00 CST, else tomorrow.")
+    parser.add_argument("--diff-only", action="store_true", help="Only email newly discovered/assigned flights compared to previous cached digest; skip email if none.")
+    parser.add_argument("--min-hour", type=int, default=None, help="Optional minimum local arrival hour (e.g. 10 to exclude arrivals before 10:00).")
     parser.add_argument("--state-dir", default="state", help="Directory to save arrivals.json for live alert dedup")
     parser.add_argument("--html-out", help="Optional path to save generated HTML")
     parser.add_argument("--smtp-config", help="Optional local smtp_config.json fallback")
@@ -769,10 +818,10 @@ def main() -> int:
     now_cst = datetime.now(CST)
     if args.date:
         target_dt = datetime.strptime(args.date, "%Y-%m-%d").replace(tzinfo=CST)
-        edition_label = "当日早报补扫" if target_dt.date() == now_cst.date() else "亮点与彩绘到港汇总"
+        edition_label = "早8点补漏简报" if args.diff_only else "亮点与彩绘到港汇总"
     elif now_cst.hour < 12:
         target_dt = now_cst.replace(hour=0, minute=0, second=0, microsecond=0)
-        edition_label = "当日早报补扫"
+        edition_label = "早8点补漏简报" if args.diff_only else "当日亮点与彩绘汇总"
     else:
         target_dt = (now_cst + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
         edition_label = "次日亮点与彩绘到港汇总"
@@ -787,20 +836,42 @@ def main() -> int:
         summary["airports"][code] = analyze_flights(raw)
 
     os.makedirs(args.state_dir, exist_ok=True)
-    # Only overwrite Beijing dedup state when running for PEK/PKX
-    if set(airport_codes) & {"PEK", "PKX"}:
-        arrivals_path = os.path.join(args.state_dir, "arrivals.json")
-        with open(arrivals_path, "w", encoding="utf-8") as fh:
-            json.dump(summary, fh, ensure_ascii=False, indent=2)
+    arrivals_path = os.path.join(args.state_dir, "arrivals.json")
 
-    html_body = build_html(summary, target_dt, edition_label=edition_label)
+    render_summary = summary
+    if args.diff_only:
+        prev_keys = load_previous_sent_keys(arrivals_path, summary["target_date"])
+        render_summary, new_count = filter_summary_diff(summary, prev_keys, min_hour=args.min_hour)
+        # Also check if any new item is in shootable window or ultra-special (ignore dark-only noise in morning diff)
+        shootable_new = 0
+        for code, ap in render_summary["airports"].items():
+            ap_tz = timezone(timedelta(seconds=ap.get("tz_offset_sec", 28800)))
+            sr, ss = airport_sunrise_sunset(target_dt.replace(tzinfo=ap_tz), ap.get("lat", BEIJING_LAT), ap.get("lon", BEIJING_LON))
+            ws, we = sr - timedelta(hours=1), ss + timedelta(hours=1)
+            lm, _ = split_by_daylight(ap["special_liveries"], ws, we)
+            hm, _ = split_by_daylight(merge_highlights(ap), ws, we)
+            shootable_new += len(lm) + len(hm)
+        print(f"DIFF_ONLY check: prev_keys={len(prev_keys)}, total_new={new_count}, shootable_or_ultra_new={shootable_new}")
+        # Always refresh full state cache so live_alert stays up to date
+        if set(airport_codes) & {"PEK", "PKX"}:
+            with open(arrivals_path, "w", encoding="utf-8") as fh:
+                json.dump(summary, fh, ensure_ascii=False, indent=2)
+        if shootable_new == 0:
+            print("DIFF_ONLY: No new shootable or ultra-special arrivals found. Skipping email.")
+            return 0
+    else:
+        if set(airport_codes) & {"PEK", "PKX"}:
+            with open(arrivals_path, "w", encoding="utf-8") as fh:
+                json.dump(summary, fh, ensure_ascii=False, indent=2)
+
+    html_body = build_html(render_summary, target_dt, edition_label=edition_label)
     if args.html_out:
         os.makedirs(os.path.dirname(os.path.abspath(args.html_out)), exist_ok=True)
         with open(args.html_out, "w", encoding="utf-8") as fh:
             fh.write(html_body)
 
     stats = " | ".join(
-        f"{c}={summary['airports'][c]['total_flights']} (livery={len(summary['airports'][c]['special_liveries'])})"
+        f"{c}={render_summary['airports'][c]['total_flights']} (livery={len(render_summary['airports'][c]['special_liveries'])})"
         for c in airport_codes
     )
     print(f"Date={summary['target_date']} ({edition_label}) | {stats}")
