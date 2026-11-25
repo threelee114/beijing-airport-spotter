@@ -20,6 +20,8 @@ from email.header import Header
 from email.mime.text import MIMEText
 from email.utils import formataddr
 
+from zh_l10n import zh_aircraft, zh_airline, zh_livery, zh_origin
+
 CST = timezone(timedelta(hours=8))
 BEIJING_LAT = 39.9042
 BEIJING_LON = 116.4074
@@ -277,11 +279,15 @@ def scan_fr24_live_arrivals(now_cst: datetime, forecast_keys: set[str]) -> list[
                 ac_text = (ac.get("model") or {}).get("text") or ""
                 reg = (ac.get("registration") or "").upper()
                 restricted = bool(ac.get("restricted"))
-                airline_name = (f.get("airline") or {}).get("name") or ""
+                airline_obj = f.get("airline") or {}
+                airline_name = airline_obj.get("name") or ""
+                airline_iata = ((airline_obj.get("code") or {}).get("iata") or "").upper()
                 owner_name = (f.get("owner") or {}).get("name") or ""
                 origin = (f.get("airport") or {}).get("origin") or {}
                 origin_iata = ((origin.get("code") or {}).get("iata") or "").upper()
-                origin_city = ((origin.get("position") or {}).get("region") or {}).get("city") or ""
+                origin_pos = origin.get("position") or {}
+                origin_city = (origin_pos.get("region") or {}).get("city") or ""
+                origin_country = (origin_pos.get("country") or {}).get("name") or ""
 
                 reasons, category, is_ultra = [], None, False
                 if matches_prefix(callsign, ULTRA_VIP_CALLSIGN_PREFIXES) or reg in ULTRA_VIP_REGS:
@@ -315,7 +321,7 @@ def scan_fr24_live_arrivals(now_cst: datetime, forecast_keys: set[str]) -> list[
 
                 already_forecasted = (f"FLTR:{flt}:{reg}" in forecast_keys) if (flt and reg) else (f"FLT:{flt}" in forecast_keys)
                 if livery_desc and is_live and not already_forecasted:
-                    reasons.append(f"🎨 临期上线/新增彩绘: {livery_desc}")
+                    reasons.append(f"🎨 临期上线/新增彩绘: {zh_livery(livery_desc)}")
                     category = category or "LIVERY_POPUP"
                 if ac_code in RARE_POPUP_TYPES and is_live and not already_forecasted:
                     reasons.append(f"✈️ 临期/新增稀有机型: {RARE_POPUP_TYPES[ac_code]}")
@@ -331,9 +337,9 @@ def scan_fr24_live_arrivals(now_cst: datetime, forecast_keys: set[str]) -> list[
                         "eta_cst": eta_cst,
                         "eta_str": eta_cst.strftime("%H:%M"),
                         "flight": flt or callsign or "N/A",
-                        "airline": airline_name or owner_name or "未知/私人",
-                        "origin": f"{origin_city} ({origin_iata})" if origin_iata else "未知",
-                        "aircraft": f"{ac_code} {ac_text}".strip(),
+                        "airline": zh_airline(airline_name, airline_iata, owner_name),
+                        "origin": zh_origin(origin_iata, origin_city, origin_country),
+                        "aircraft": zh_aircraft(ac_text, ac_code),
                         "registration": reg,
                         "status": status_text or ("飞行中" if is_live else "计划"),
                         "reasons": reasons,
