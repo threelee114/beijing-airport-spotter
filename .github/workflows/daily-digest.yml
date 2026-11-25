@@ -1,13 +1,19 @@
-name: Daily PEK/PKX Arrivals & Liveries Digest
+name: Daily Arrivals & Liveries Digest
 
 on:
   schedule:
-    # 每天 UTC 12:00 = 北京时间 20:00
+    # 每天 UTC 12:00 = 北京时间 20:00（发送次日预告）
     - cron: "0 12 * * *"
+    # 每天 UTC 22:30 = 北京时间 06:30（发送当日早报补扫，补齐今早刚出炉的国内彩绘排机）
+    - cron: "30 22 * * *"
   workflow_dispatch:
     inputs:
+      airports:
+        description: "目标机场三字码，逗号分隔（默认 PEK,PKX；去外地可填如 PVG,SHA 或 CAN 或 CTU,TFU 或 HKG）"
+        required: false
+        default: ""
       target_date:
-        description: "可选：指定目标日期 YYYY-MM-DD（默认明天）"
+        description: "可选：指定目标日期 YYYY-MM-DD（留空则上午查今日、下午/晚上查明日）"
         required: false
         default: ""
 
@@ -17,7 +23,7 @@ permissions:
 jobs:
   daily-digest:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 6
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -35,17 +41,18 @@ jobs:
           restore-keys: |
             spotter-state-
 
-      - name: Run daily arrivals & liveries digest
+      - name: Run arrivals & liveries digest
         env:
           SMTP_163_USER: ${{ secrets.SMTP_163_USER }}
           SMTP_163_AUTH_CODE: ${{ secrets.SMTP_163_AUTH_CODE }}
           ALERT_TO_EMAIL: ${{ secrets.ALERT_TO_EMAIL }}
+          TARGET_AIRPORTS: ${{ github.event.inputs.airports || vars.TARGET_AIRPORTS || 'PEK,PKX' }}
         run: |
+          ARGS="--state-dir state --airports ${TARGET_AIRPORTS}"
           if [ -n "${{ github.event.inputs.target_date }}" ]; then
-            python scripts/daily_digest.py --state-dir state --date "${{ github.event.inputs.target_date }}"
-          else
-            python scripts/daily_digest.py --state-dir state
+            ARGS="$ARGS --date ${{ github.event.inputs.target_date }}"
           fi
+          python scripts/daily_digest.py $ARGS
 
       - name: Save state cache (for live alert dedup)
         if: always()
