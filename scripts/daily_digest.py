@@ -22,6 +22,8 @@ from email.header import Header
 from email.mime.text import MIMEText
 from email.utils import formataddr
 
+from zh_l10n import zh_aircraft, zh_airline, zh_country, zh_livery, zh_origin
+
 CST = timezone(timedelta(hours=8))
 BEIJING_LAT = 39.9042
 BEIJING_LON = 116.4074
@@ -109,58 +111,58 @@ KNOWN_SPECIAL_LIVERIES = {
 ROUTINE_REGIONAL_CARRIERS = {"CX", "HX", "UO", "NX", "KE", "OZ", "NH", "JL", "BR", "CI", "SQ", "TG", "VN", "MH", "AK", "VJ", "S7"}
 
 SPECIAL_AIRCRAFT_CODES = {
-    "A388": "Airbus A380-800 超大型双层宽体机",
-    "388": "Airbus A380-800 超大型双层宽体机",
-    "B748": "Boeing 747-8 珍稀四发巨无霸",
-    "748": "Boeing 747-8 珍稀四发巨无霸",
-    "74N": "Boeing 747-8F 珍稀四发全货机",
-    "B744": "Boeing 747-400 经典四发巨无霸",
-    "744": "Boeing 747-400 经典四发巨无霸",
-    "74Y": "Boeing 747-400F 经典四发全货机",
-    "74F": "Boeing 747 Freighter 四发全货机",
-    "B742": "Boeing 747-200 经典老旧四发机",
-    "B743": "Boeing 747-300 经典老旧四发机",
-    "B74S": "Boeing 747SP 绝版短体四发机",
-    "A346": "Airbus A340-600 罕见四发宽体机",
-    "A345": "Airbus A340-500 罕见四发宽体机",
-    "A343": "Airbus A340-300 罕见四发宽体机",
-    "A342": "Airbus A340-200 罕见四发宽体机",
-    "A124": "Antonov An-124 巨型战略运输机",
-    "IL96": "Ilyushin Il-96 俄制四发宽体机/专机",
-    "IL76": "Ilyushin Il-76 俄制重型运输机",
-    "IL62": "Ilyushin Il-62 经典俄制四发客机",
-    "T204": "Tupolev Tu-204 俄制客/货机",
-    "T214": "Tupolev Tu-214 俄制特种/客机",
-    "SU95": "Sukhoi Superjet 100 俄制支线机",
-    "MD11": "McDonnell Douglas MD-11 三发宽体货机",
-    "DC10": "McDonnell Douglas DC-10 三发宽体机",
-    "A306": "Airbus A300-600 经典宽体机",
-    "A310": "Airbus A310 罕见经典宽体机",
-    "B752": "Boeing 757-200 经典窄体/货机",
-    "B753": "Boeing 757-300 罕见加长757",
-    "75F": "Boeing 757F 经典全货机",
-    "B762": "Boeing 767-200 少见宽体机",
-    "B763": "Boeing 767-300 少见767宽体机",
-    "763": "Boeing 767-300 少见767宽体机",
-    "76F": "Boeing 767F 宽体全货机",
-    "B764": "Boeing 767-400ER 罕见767子型号",
-    "B77L": "Boeing 777-200LR / 777F 远程宽体/货机",
-    "B77F": "Boeing 777F 宽体全货机",
-    "77X": "Boeing 777F 宽体全货机",
-    "B772": "Boeing 777-200ER 早期经典777",
-    "A35K": "Airbus A350-1000 旗舰大型宽体机",
-    "351": "Airbus A350-1000 旗舰大型宽体机",
-    "B78X": "Boeing 787-10 加长梦想客机",
-    "781": "Boeing 787-10 加长梦想客机",
-    "A338": "Airbus A330-800neo 极罕见宽体机",
-    "A339": "Airbus A330-900neo 少见新一代宽体机",
-    "339": "Airbus A330-900neo 少见新一代宽体机",
-    "A33F": "Airbus A330-200F 宽体全货机",
-    "A318": "Airbus A318 罕见小型A320家族/VIP",
-    "BCS1": "Airbus A220-100 少见窄体机",
-    "BCS3": "Airbus A220-300 少见窄体机",
-    "E290": "Embraer E190-E2 新一代巴航支线机",
-    "E295": "Embraer E195-E2 新一代巴航支线机",
+    "A388": "空客 A380-800 超大型双层宽体机",
+    "388": "空客 A380-800 超大型双层宽体机",
+    "B748": "波音 747-8 珍稀四发巨无霸",
+    "748": "波音 747-8 珍稀四发巨无霸",
+    "74N": "波音 747-8F 珍稀四发全货机",
+    "B744": "波音 747-400 经典四发巨无霸",
+    "744": "波音 747-400 经典四发巨无霸",
+    "74Y": "波音 747-400F 经典四发全货机",
+    "74F": "波音 747 全货机",
+    "B742": "波音 747-200 经典老旧四发机",
+    "B743": "波音 747-300 经典老旧四发机",
+    "B74S": "波音 747SP 绝版短体四发机",
+    "A346": "空客 A340-600 罕见四发宽体机",
+    "A345": "空客 A340-500 罕见四发宽体机",
+    "A343": "空客 A340-300 罕见四发宽体机",
+    "A342": "空客 A340-200 罕见四发宽体机",
+    "A124": "安东诺夫 An-124 巨型战略运输机",
+    "IL96": "伊留申 Il-96 俄制四发宽体机/专机",
+    "IL76": "伊留申 Il-76 俄制重型运输机",
+    "IL62": "伊留申 Il-62 经典俄制四发客机",
+    "T204": "图波列夫 Tu-204 俄制客/货机",
+    "T214": "图波列夫 Tu-214 俄制特种/客机",
+    "SU95": "苏霍伊 SSJ-100 俄制支线机",
+    "MD11": "麦道 MD-11 三发宽体货机",
+    "DC10": "麦道 DC-10 三发宽体机",
+    "A306": "空客 A300-600 经典宽体机",
+    "A310": "空客 A310 罕见经典宽体机",
+    "B752": "波音 757-200 经典窄体/货机",
+    "B753": "波音 757-300 罕见加长757",
+    "75F": "波音 757F 经典全货机",
+    "B762": "波音 767-200 少见宽体机",
+    "B763": "波音 767-300 少见767宽体机",
+    "763": "波音 767-300 少见767宽体机",
+    "76F": "波音 767F 宽体全货机",
+    "B764": "波音 767-400ER 罕见767子型号",
+    "B77L": "波音 777-200LR / 777F 远程宽体/货机",
+    "B77F": "波音 777F 宽体全货机",
+    "77X": "波音 777F 宽体全货机",
+    "B772": "波音 777-200ER 早期经典777",
+    "A35K": "空客 A350-1000 旗舰大型宽体机",
+    "351": "空客 A350-1000 旗舰大型宽体机",
+    "B78X": "波音 787-10 加长梦想客机",
+    "781": "波音 787-10 加长梦想客机",
+    "A338": "空客 A330-800neo 极罕见宽体机",
+    "A339": "空客 A330-900neo 少见新一代宽体机",
+    "339": "空客 A330-900neo 少见新一代宽体机",
+    "A33F": "空客 A330-200F 宽体全货机",
+    "A318": "空客 A318 罕见小型A320家族/VIP",
+    "BCS1": "空客 A220-100 少见窄体机",
+    "BCS3": "空客 A220-300 少见窄体机",
+    "E290": "巴航工业 E190-E2 新一代支线机",
+    "E295": "巴航工业 E195-E2 新一代支线机",
 }
 
 BIZJET_CODES = {
@@ -387,7 +389,7 @@ def analyze_flights(airport_result: dict) -> dict:
         if ac_code == "C919":
             c919_count += 1
             if reg in {"B-919A", "B-919X"} or origin_country not in {"China", ""}:
-                c919_highlights.append(f"{f['arrival_time']} {f['flight_number']} ({f['origin_city']}, {reg or 'C919'})")
+                c919_highlights.append(f"{f['arrival_time']} {f['flight_number']}（{zh_origin(f['origin_iata'], f['origin_city'], origin_country)}，{reg or 'C919'}）")
 
         # 1. Special liveries
         livery_reasons = []
@@ -397,9 +399,9 @@ def analyze_flights(airport_result: dict) -> dict:
             p_txt = (airline_raw[s_i:e_i] if e_i > s_i else airline_raw[s_i:]).strip()
             # Skip our own Chinese translation suffixes in FR24_AIRLINE_FIXES
             if p_txt and not any(ch >= "\u4e00" for ch in p_txt) and p_txt.lower() not in {"cargo", "express", "regional"}:
-                livery_reasons.append(f"🎨 {p_txt}")
+                livery_reasons.append(f"🎨 {zh_livery(p_txt)}")
         elif any(kw in airline_raw.lower() for kw in SPECIAL_LIVERY_KEYWORDS):
-            livery_reasons.append(f"🎨 {airline_raw}")
+            livery_reasons.append(f"🎨 {zh_livery(airline_raw)}")
         elif reg in KNOWN_SPECIAL_LIVERIES:
             livery_reasons.append(f"🎨 {KNOWN_SPECIAL_LIVERIES[reg]}")
         if livery_reasons:
@@ -437,7 +439,7 @@ def analyze_flights(airport_result: dict) -> dict:
             if freq <= 2:
                 rare_airlines.append({
                     **f,
-                    "reasons": [f"🌍 稀缺/低频航司（{origin_country or '海外'} · 当日仅 {freq} 班）"],
+                    "reasons": [f"🌍 稀缺/低频航司（{zh_country(origin_country)} · 当日仅 {freq} 班）"],
                 })
 
     return {
@@ -472,13 +474,14 @@ def render_rows(items: list[dict], win_start: datetime, win_end: datetime, empty
         light_tag = ' <span style="font-size:11px;color:#b45309;">☀可拍</span>' if shootable else ""
         flt = f["flight_number"] or f["callsign"] or "N/A"
         reg_html = f'<br><span style="color:#2563eb;">{esc(f["registration"])}</span>' if f["registration"] else ""
-        ac_disp = f["aircraft_text"] or f["aircraft_code"] or "未知"
-        orig_disp = f"{f['origin_city']} ({f['origin_iata']})" if f["origin_iata"] else "未知"
+        ac_disp = zh_aircraft(f["aircraft_text"], f["aircraft_code"])
+        airline_disp = zh_airline(f["airline"], f["airline_iata"], f["owner"])
+        orig_disp = zh_origin(f["origin_iata"], f["origin_city"], f["origin_country"])
         out.append(f"""
         <tr style="background-color:{bg};">
           <td style="border:1px solid #e2e8f0;padding:7px;white-space:nowrap;"><strong>{esc(f['arrival_time'])}</strong>{light_tag}</td>
           <td style="border:1px solid #e2e8f0;padding:7px;"><strong>{esc(flt)}</strong></td>
-          <td style="border:1px solid #e2e8f0;padding:7px;">{esc(f['airline'] or f['owner'] or '未知')}<br><span style="color:#64748b;font-size:12px;">{esc(orig_disp)}</span></td>
+          <td style="border:1px solid #e2e8f0;padding:7px;">{esc(airline_disp)}<br><span style="color:#64748b;font-size:12px;">{esc(orig_disp)}</span></td>
           <td style="border:1px solid #e2e8f0;padding:7px;">{esc(ac_disp)}{reg_html}</td>
           <td style="border:1px solid #e2e8f0;padding:7px;">{'<br>'.join(esc(r) for r in f['reasons'])}</td>
         </tr>""")
