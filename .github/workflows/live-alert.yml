@@ -1,0 +1,51 @@
+name: Live PEK/PKX VIP & Diversion Alert
+
+on:
+  schedule:
+    # 公开仓库 Actions 无限免费：全天 24 小时每 15 分钟巡检一次
+    # （脚本内置北京每日天文日出/日落过滤：常规目标仅在日出前1h至日落后1h推送，极特殊专机如 AF1/IL-96/AN-124 全天候直通）
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-alert-runner
+  cancel-in-progress: false
+
+jobs:
+  live-alert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Restore state cache
+        uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: spotter-state-live-${{ github.run_id }}
+          restore-keys: |
+            spotter-state-
+
+      - name: Scan live radar and arrivals
+        env:
+          SMTP_163_USER: ${{ secrets.SMTP_163_USER }}
+          SMTP_163_AUTH_CODE: ${{ secrets.SMTP_163_AUTH_CODE }}
+          ALERT_TO_EMAIL: ${{ secrets.ALERT_TO_EMAIL }}
+        run: |
+          python scripts/live_alert.py --state-dir state
+
+      - name: Save updated dedup state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state
+          key: spotter-state-live-${{ github.run_id }}
