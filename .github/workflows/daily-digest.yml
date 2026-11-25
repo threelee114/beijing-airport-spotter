@@ -2,10 +2,10 @@ name: Daily Arrivals & Liveries Digest
 
 on:
   schedule:
-    # 每天 UTC 12:00 = 北京时间 20:00（发送次日预告）
+    # 每天 UTC 12:00 = 北京时间 20:00（发送次日完整预告）
     - cron: "0 12 * * *"
-    # 每天 UTC 22:30 = 北京时间 06:30（发送当日早报补扫，补齐今早刚出炉的国内彩绘排机）
-    - cron: "30 22 * * *"
+    # 每天 UTC 00:00 = 北京时间 08:00（仅补发昨晚遗漏/今早新排机出的彩绘与亮点，无新增则不发）
+    - cron: "0 0 * * *"
   workflow_dispatch:
     inputs:
       airports:
@@ -47,10 +47,14 @@ jobs:
           SMTP_163_AUTH_CODE: ${{ secrets.SMTP_163_AUTH_CODE }}
           ALERT_TO_EMAIL: ${{ secrets.ALERT_TO_EMAIL }}
           TARGET_AIRPORTS: ${{ github.event.inputs.airports || vars.TARGET_AIRPORTS || 'PEK,PKX' }}
+          IS_MORNING_DIFF: ${{ github.event.schedule == '0 0 * * *' && '1' || '0' }}
         run: |
           ARGS="--state-dir state --airports ${TARGET_AIRPORTS}"
           if [ -n "${{ github.event.inputs.target_date }}" ]; then
             ARGS="$ARGS --date ${{ github.event.inputs.target_date }}"
+          fi
+          if [ "${IS_MORNING_DIFF}" = "1" ]; then
+            ARGS="$ARGS --diff-only --min-hour 10"
           fi
           python scripts/daily_digest.py $ARGS
 
