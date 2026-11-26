@@ -278,6 +278,7 @@ def scan_fr24_live_arrivals(now_cst: datetime, forecast_keys: set[str]) -> list[
                 ac_code = ((ac.get("model") or {}).get("code") or "").upper()
                 ac_text = (ac.get("model") or {}).get("text") or ""
                 reg = (ac.get("registration") or "").upper()
+                hex_code = (ac.get("hex") or "").upper()
                 restricted = bool(ac.get("restricted"))
                 airline_obj = f.get("airline") or {}
                 airline_name = airline_obj.get("name") or ""
@@ -328,6 +329,14 @@ def scan_fr24_live_arrivals(now_cst: datetime, forecast_keys: set[str]) -> list[
                     category = category or "RARE_POPUP"
 
                 if reasons:
+                    utc_date = now_cst.astimezone(timezone.utc).strftime("%Y-%m-%d")
+                    fid = (ident.get("id") or "")
+                    fr24_link = (
+                        f"https://www.flightradar24.com/{callsign or flt}/{fid}"
+                        if (callsign or flt) and fid
+                        else (f"https://www.flightradar24.com/data/aircraft/{reg.lower()}" if reg else f"https://www.flightradar24.com/{callsign or flt}")
+                    )
+                    adsb_link = f"https://globe.adsb.lol/?icao={hex_code.lower()}&showTrace={utc_date}" if hex_code else ""
                     alerts.append({
                         "dedup_key": f"FR24ARR:{ap}:{flt or callsign}:{reg}:{eta_cst.strftime('%Y-%m-%d')}",
                         "source": "FR24 实时到港",
@@ -343,7 +352,8 @@ def scan_fr24_live_arrivals(now_cst: datetime, forecast_keys: set[str]) -> list[
                         "registration": reg,
                         "status": status_text or ("飞行中" if is_live else "计划"),
                         "reasons": reasons,
-                        "fr24_url": f"https://www.flightradar24.com/{callsign or flt}" if (callsign or flt) else "https://www.flightradar24.com/",
+                        "fr24_url": fr24_link,
+                        "adsb_url": adsb_link,
                     })
     return alerts
 
@@ -404,6 +414,13 @@ def scan_fr24_live_radar(now_cst: datetime, forecast_keys: set[str]) -> list[dic
             category = category or "LIVERY_POPUP"
 
         if reasons:
+            utc_date = now_cst.astimezone(timezone.utc).strftime("%Y-%m-%d")
+            fr24_link = (
+                f"https://www.flightradar24.com/{callsign or flt}/{fid}"
+                if (callsign or flt)
+                else (f"https://www.flightradar24.com/data/aircraft/{reg.lower()}" if reg else "")
+            )
+            adsb_link = f"https://globe.adsb.lol/?icao={hex_code.lower()}&showTrace={utc_date}" if hex_code else ""
             alerts.append({
                 "dedup_key": f"LIVE:{hex_code or callsign}:{reg}:{now_cst.strftime('%Y-%m-%d')}",
                 "source": "FR24 实时雷达",
@@ -419,7 +436,8 @@ def scan_fr24_live_radar(now_cst: datetime, forecast_keys: set[str]) -> list[dic
                 "registration": reg or hex_code,
                 "status": f"距京 {int(dist_km)}km · 高度 {alt_ft}ft · 速度 {gs_kt}kt",
                 "reasons": reasons,
-                "fr24_url": f"https://www.flightradar24.com/{callsign or flt}/{fid}" if (callsign or flt) else "https://www.flightradar24.com/",
+                "fr24_url": fr24_link,
+                "adsb_url": adsb_link,
             })
     return alerts
 
@@ -469,6 +487,9 @@ def scan_adsb_lol(now_cst: datetime) -> list[dict]:
         if reasons:
             eta_hours = (dist_km / max(float(gs) * 1.852, 350.0)) if dist_km > 20 else 0.08
             eta_cst = now_cst + timedelta(hours=min(eta_hours, 4.0))
+            utc_date = now_cst.astimezone(timezone.utc).strftime("%Y-%m-%d")
+            adsb_link = f"https://globe.adsb.lol/?icao={hex_code.lower()}&showTrace={utc_date}" if hex_code else "https://globe.adsb.lol/"
+            fr24_link = f"https://www.flightradar24.com/data/aircraft/{reg.lower()}" if reg else ""
             alerts.append({
                 "dedup_key": f"LIVE:{hex_code or callsign}:{reg}:{now_cst.strftime('%Y-%m-%d')}",
                 "source": "adsb.lol 未屏蔽雷达",
@@ -484,7 +505,8 @@ def scan_adsb_lol(now_cst: datetime) -> list[dict]:
                 "registration": reg or f"HEX:{hex_code}",
                 "status": f"高度 {alt_ft}ft · 升降率 {baro_rate}fpm · 地速 {int(gs)}kt",
                 "reasons": reasons,
-                "fr24_url": f"https://globe.adsb.lol/?icao={hex_code.lower()}" if hex_code else "https://globe.adsb.lol/",
+                "fr24_url": fr24_link,
+                "adsb_url": adsb_link,
             })
     return alerts
 
@@ -494,6 +516,12 @@ def build_alert_html(alerts: list[dict], now_cst: datetime, sunrise: datetime, s
     for a in alerts:
         bg = "#fef2f2" if a["is_ultra"] else "#fffbeb"
         badge = "🚨 极特殊/全天候直通" if a["is_ultra"] else "⚡ 拍机时段突发提醒"
+        links = []
+        if a.get("adsb_url"):
+            links.append(f'<a href="{a["adsb_url"]}" style="color:#2563eb;font-size:12px;">adsb.lol 当日航迹 →</a>')
+        if a.get("fr24_url"):
+            links.append(f'<a href="{a["fr24_url"]}" style="color:#2563eb;font-size:12px;">FR24 追踪/档案 →</a>')
+        links_html = " &nbsp;|&nbsp; ".join(links)
         rows_html.append(f"""
         <tr style="background-color:{bg};">
           <td style="border:1px solid #e2e8f0;padding:8px;"><strong>{a['eta_str']}</strong><br><span style="font-size:11px;color:#64748b;">{a['airport']}</span></td>
@@ -503,7 +531,7 @@ def build_alert_html(alerts: list[dict], now_cst: datetime, sunrise: datetime, s
           <td style="border:1px solid #e2e8f0;padding:8px;">
             <span style="display:inline-block;font-size:11px;padding:2px 6px;border-radius:4px;background:#fee2e2;color:#991b1b;margin-bottom:4px;">{badge}</span><br>
             {'<br>'.join(a['reasons'])}<br>
-            <a href="{a['fr24_url']}" style="color:#2563eb;font-size:12px;">查看实时雷达追踪 →</a>
+            {links_html}
           </td>
         </tr>""")
     return f"""<!DOCTYPE html>
