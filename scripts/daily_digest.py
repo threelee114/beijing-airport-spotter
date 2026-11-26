@@ -456,8 +456,10 @@ def analyze_flights(airport_result: dict) -> dict:
                 reasons.append("📋 无常规商业航班号（疑为包机/调机）")
             vip_or_unusual.append({**f, "reasons": reasons})
 
-        # 3. Special / iconic aircraft (excluding high-volume C919 which is summarized cleanly)
-        if ac_code in SPECIAL_AIRCRAFT_CODES:
+        # 3. Special / iconic aircraft (plus COMAC factory C919 test/demo frames)
+        if is_comac_factory_aircraft(ac_code, reg, airline_raw, f["owner"], f["callsign"], f["flight_number"]):
+            special_aircraft.append({**f, "reasons": ["🚨 中国商飞 COMAC 自持/试飞演示机（24h直通）"]})
+        elif ac_code in SPECIAL_AIRCRAFT_CODES:
             special_aircraft.append({**f, "reasons": [f"✈️ {SPECIAL_AIRCRAFT_CODES[ac_code]}"]})
 
         # 4. International or widebody cargo
@@ -510,6 +512,24 @@ ULTRA_VIP_CALLSIGN_PREFIXES = (
 ULTRA_VIP_REGS = {"B-2479", "82-8000", "92-9000", "73-1676", "73-1677", "74-0787", "75-0125"}
 
 
+def is_comac_factory_aircraft(ac_code: str, reg: str, airline: str, owner: str, callsign: str = "", flt: str = "") -> bool:
+    ac = (ac_code or "").upper()
+    r = (reg or "").upper()
+    cs = (callsign or "").upper()
+    op = f"{airline or ''} {owner or ''}".lower()
+    if r.startswith(("B-001", "B-002")) or cs.startswith(("COMAC", "B001", "B002")):
+        return True
+    if ac in {"C919", "C929"}:
+        if "comac" in op or "commercial aircraft corporation" in op or "商飞" in op:
+            return True
+        # Undelivered/ferry COMAC C919 (e.g. B-658x without commercial airline owner/flight number)
+        if not flt and r.startswith(("B-658", "B-659", "B-919")) and not any(
+            k in op for k in ("air china", "china eastern", "china southern")
+        ):
+            return True
+    return False
+
+
 def is_ultra_special(f: dict) -> bool:
     cs = (f.get("callsign") or "").upper()
     reg = (f.get("registration") or "").upper()
@@ -518,6 +538,7 @@ def is_ultra_special(f: dict) -> bool:
         ac in ULTRA_SPECIAL_TYPES
         or reg in ULTRA_VIP_REGS
         or any(cs.startswith(p) for p in ULTRA_VIP_CALLSIGN_PREFIXES)
+        or is_comac_factory_aircraft(ac, reg, f.get("airline", ""), f.get("owner", ""), cs, f.get("flight_number", ""))
     )
 
 
