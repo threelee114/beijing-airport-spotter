@@ -235,6 +235,13 @@ def matches_prefix(callsign: str, prefixes: tuple[str, ...]) -> bool:
     return bool(cs) and any(cs.startswith(p) for p in prefixes)
 
 
+COMMERCIAL_CN_CALLSIGNS = (
+    "CCA", "CES", "CSN", "CHH", "CXA", "CSC", "CSZ", "CDG", "CSH", "DKH",
+    "CQH", "CUA", "CBJ", "CDC", "GCR", "KNA", "UEA", "TBA", "LKE", "HBH",
+    "EPA", "CYZ", "CSS", "JDL",
+)
+
+
 def is_comac_factory_aircraft(ac_code: str, reg: str, airline: str = "", owner: str = "", callsign: str = "", flt: str = "") -> bool:
     ac = (ac_code or "").upper()
     r = (reg or "").upper()
@@ -242,13 +249,10 @@ def is_comac_factory_aircraft(ac_code: str, reg: str, airline: str = "", owner: 
     op = f"{airline or ''} {owner or ''}".lower()
     if r.startswith(("B-001", "B-002")) or cs.startswith(("COMAC", "B001", "B002")):
         return True
-    if ac in {"C919", "C929"}:
-        if "comac" in op or "commercial aircraft corporation" in op or "商飞" in op:
-            return True
-        if not flt and r.startswith(("B-658", "B-659", "B-919")) and not any(
-            k in op for k in ("air china", "china eastern", "china southern")
-        ):
-            return True
+    if flt or any(cs.startswith(p) for p in COMMERCIAL_CN_CALLSIGNS):
+        return False
+    if ac in {"C919", "C929"} and ("comac" in op or "commercial aircraft corporation" in op or "商飞" in op):
+        return True
     return False
 
 
