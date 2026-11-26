@@ -545,21 +545,22 @@ def send_email(subject: str, html_body: str, config_path: str | None = None) -> 
             cfg = json.load(fh)
     user = (os.environ.get("SMTP_163_USER") or cfg.get("user") or "").strip()
     auth_code = (os.environ.get("SMTP_163_AUTH_CODE") or cfg.get("auth_code") or "").strip()
-    recipient = (os.environ.get("ALERT_TO_EMAIL") or cfg.get("default_to") or user).strip()
+    raw_recipients = (os.environ.get("ALERT_TO_EMAIL") or cfg.get("default_to") or user).strip()
+    recipients = [r.strip() for r in raw_recipients.replace(";", ",").split(",") if r.strip()]
     host = os.environ.get("SMTP_HOST") or cfg.get("host") or "smtp.163.com"
     port = int(os.environ.get("SMTP_PORT") or cfg.get("port") or 465)
-    if not user or not auth_code or not recipient:
+    if not user or not auth_code or not recipients:
         raise RuntimeError("Missing SMTP_163_USER / SMTP_163_AUTH_CODE / ALERT_TO_EMAIL")
 
     msg = MIMEText(html_body, "html", "utf-8")
     msg["From"] = formataddr((str(Header("北京机场实时预警", "utf-8")), user))
-    msg["To"] = recipient
+    msg["To"] = ", ".join(recipients)
     msg["Subject"] = Header(subject, "utf-8")
 
     ctx = ssl.create_default_context()
     with smtplib.SMTP_SSL(host, port, context=ctx, timeout=25) as server:
         server.login(user, auth_code)
-        server.sendmail(user, [recipient], msg.as_string())
+        server.sendmail(user, recipients, msg.as_string())
 
 
 def main() -> int:
