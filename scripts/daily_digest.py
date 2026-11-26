@@ -669,7 +669,7 @@ def build_html(summary: dict, target_dt: datetime, edition_label: str = "次日�
             )
 
         livery_sections.append(f"""
-    <h4 style="margin:12px 0 6px 0;color:#0f172a;">📍 {esc(ap_name)} 可拍时段彩绘（{len(liv_main)} 班）</h4>
+    <h3 style="margin:14px 0 6px 0;color:#0f172a;">🎨 {esc(ap_name)} 可拍时段彩绘（{len(liv_main)} 班）</h3>
     <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:14px;">
       {thead_livery}
       <tbody>{render_rows(liv_main, ap_ws, ap_we, f'可拍时段内暂未检出已排机 {code} 彩绘')}</tbody>
@@ -700,11 +700,6 @@ def build_html(summary: dict, target_dt: datetime, edition_label: str = "次日�
       <strong>当地日出/日落：</strong>{sunrise.strftime('%H:%M')} / {sunset.strftime('%H:%M')}（主区仅展示可拍窗口 <strong>{win_start.strftime('%H:%M')}–{win_end.strftime('%H:%M')}</strong> 及 🚨24h直通目标）
     </p>
 
-    <div style="background:#fdf2f8;border-left:4px solid #db2777;padding:10px 14px;border-radius:4px;margin-bottom:12px;">
-      <h3 style="margin:0 0 2px 0;font-size:15px;color:#9d174d;">🎨 可拍时段彩绘与特别涂装全览（{' / '.join(livery_stats)}）</h3>
-      <p style="margin:0;font-size:12px;color:#831843;">所有已排机彩绘全部如实列出、不做重要性删减；尚未在 FR24 分配注册号的航班起飞前如上线彩绘，将由实时预警自动补推。</p>
-    </div>
-
     {''.join(livery_sections)}
     {''.join(highlight_sections)}
 
@@ -732,23 +727,24 @@ def send_smtp(subject: str, html_body: str, config_path: str | None = None) -> N
             cfg = json.load(fh)
     user = (os.environ.get("SMTP_163_USER") or cfg.get("user") or "").strip()
     auth_code = (os.environ.get("SMTP_163_AUTH_CODE") or cfg.get("auth_code") or "").strip()
-    recipient = (os.environ.get("ALERT_TO_EMAIL") or cfg.get("default_to") or user).strip()
+    raw_recipients = (os.environ.get("ALERT_TO_EMAIL") or cfg.get("default_to") or user).strip()
+    recipients = [r.strip() for r in raw_recipients.replace(";", ",").split(",") if r.strip()]
     host = os.environ.get("SMTP_HOST") or cfg.get("host") or "smtp.163.com"
     port = int(os.environ.get("SMTP_PORT") or cfg.get("port") or 465)
 
-    if not user or not auth_code or not recipient:
+    if not user or not auth_code or not recipients:
         raise RuntimeError("Missing SMTP_163_USER / SMTP_163_AUTH_CODE / ALERT_TO_EMAIL")
 
     msg = MIMEText(html_body, "html", "utf-8")
     msg["From"] = formataddr((str(Header("北京机场航班简报", "utf-8")), user))
-    msg["To"] = recipient
+    msg["To"] = ", ".join(recipients)
     msg["Subject"] = Header(subject, "utf-8")
 
     ctx = ssl.create_default_context()
     with smtplib.SMTP_SSL(host, port, context=ctx, timeout=25) as server:
         server.login(user, auth_code)
-        server.sendmail(user, [recipient], msg.as_string())
-    print(f"DAILY_DIGEST_SENT_OK: {subject} -> {recipient}")
+        server.sendmail(user, recipients, msg.as_string())
+    print(f"DAILY_DIGEST_SENT_OK: {subject} -> {', '.join(recipients)}")
 
 
 def load_previous_sent_keys(arrivals_path: str, target_date: str) -> set[tuple[str, str, str]]:
