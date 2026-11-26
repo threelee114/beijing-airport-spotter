@@ -735,16 +735,16 @@ def send_smtp(subject: str, html_body: str, config_path: str | None = None) -> N
     if not user or not auth_code or not recipients:
         raise RuntimeError("Missing SMTP_163_USER / SMTP_163_AUTH_CODE / ALERT_TO_EMAIL")
 
-    msg = MIMEText(html_body, "html", "utf-8")
-    msg["From"] = formataddr((str(Header("北京机场航班简报", "utf-8")), user))
-    msg["To"] = ", ".join(recipients)
-    msg["Subject"] = Header(subject, "utf-8")
-
     ctx = ssl.create_default_context()
     with smtplib.SMTP_SSL(host, port, context=ctx, timeout=25) as server:
         server.login(user, auth_code)
-        server.sendmail(user, recipients, msg.as_string())
-    print(f"DAILY_DIGEST_SENT_OK: {subject} -> {', '.join(recipients)}")
+        for rcpt in recipients:
+            msg = MIMEText(html_body, "html", "utf-8")
+            msg["From"] = formataddr((str(Header("北京机场航班简报", "utf-8")), user))
+            msg["To"] = rcpt
+            msg["Subject"] = Header(subject, "utf-8")
+            server.sendmail(user, [rcpt], msg.as_string())
+    print(f"DAILY_DIGEST_SENT_OK: {subject} (count={len(recipients)})")
 
 
 def load_previous_sent_keys(arrivals_path: str, target_date: str) -> set[tuple[str, str, str]]:
