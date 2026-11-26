@@ -586,11 +586,16 @@ def main() -> int:
     raw_alerts.extend(scan_fr24_live_radar(now_cst, forecast_keys))
     raw_alerts.extend(scan_adsb_lol(now_cst))
 
+    is_quiet_hours = (now_cst.hour >= 20) or (now_cst.hour < 8)
     merged = {}
     suppressed_dark = 0
+    suppressed_quiet = 0
     for a in raw_alerts:
         key = a["dedup_key"]
         if key in notified:
+            continue
+        if is_quiet_hours and not a["is_ultra"]:
+            suppressed_quiet += 1
             continue
         shootable, _, _ = is_within_shootable_window(a["eta_cst"])
         if not shootable and not a["is_ultra"]:
@@ -608,8 +613,8 @@ def main() -> int:
     final_alerts = sorted(merged.values(), key=lambda x: (not x["is_ultra"], x["eta_cst"]))
     print(
         f"[{now_cst.strftime('%Y-%m-%d %H:%M:%S CST')}] "
-        f"Beijing sunrise={sunrise.strftime('%H:%M')} sunset={sunset.strftime('%H:%M')} | "
-        f"raw={len(raw_alerts)}, suppressed_dark={suppressed_dark}, to_notify={len(final_alerts)}"
+        f"Beijing sunrise={sunrise.strftime('%H:%M')} sunset={sunset.strftime('%H:%M')} quiet={is_quiet_hours} | "
+        f"raw={len(raw_alerts)}, suppressed_quiet={suppressed_quiet}, suppressed_dark={suppressed_dark}, to_notify={len(final_alerts)}"
     )
 
     if not final_alerts or args.dry_run:
