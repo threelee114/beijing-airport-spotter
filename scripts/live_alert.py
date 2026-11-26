@@ -235,6 +235,23 @@ def matches_prefix(callsign: str, prefixes: tuple[str, ...]) -> bool:
     return bool(cs) and any(cs.startswith(p) for p in prefixes)
 
 
+def is_comac_factory_aircraft(ac_code: str, reg: str, airline: str = "", owner: str = "", callsign: str = "", flt: str = "") -> bool:
+    ac = (ac_code or "").upper()
+    r = (reg or "").upper()
+    cs = (callsign or "").upper()
+    op = f"{airline or ''} {owner or ''}".lower()
+    if r.startswith(("B-001", "B-002")) or cs.startswith(("COMAC", "B001", "B002")):
+        return True
+    if ac in {"C919", "C929"}:
+        if "comac" in op or "commercial aircraft corporation" in op or "商飞" in op:
+            return True
+        if not flt and r.startswith(("B-658", "B-659", "B-919")) and not any(
+            k in op for k in ("air china", "china eastern", "china southern")
+        ):
+            return True
+    return False
+
+
 def scan_fr24_live_arrivals(now_cst: datetime, forecast_keys: set[str]) -> list[dict]:
     alerts = []
     now_ts = int(now_cst.timestamp())
@@ -296,6 +313,9 @@ def scan_fr24_live_arrivals(now_cst: datetime, forecast_keys: set[str]) -> list[
                     category, is_ultra = "VIP_ULTRA", True
                 if ac_code in ULTRA_RARE_TYPES:
                     reasons.append(f"🚨 殿堂级极稀有机型: {ULTRA_RARE_TYPES[ac_code]}")
+                    category, is_ultra = category or "RARE_ULTRA", True
+                if is_comac_factory_aircraft(ac_code, reg, airline_name, owner_name, callsign, flt):
+                    reasons.append(f"🚨 中国商飞 COMAC 自持/试飞演示机 ({reg or callsign or ac_code})")
                     category, is_ultra = category or "RARE_ULTRA", True
                 if diverted:
                     reasons.append(f"🔀 突发备降 {ap} ({status_text})")
@@ -401,6 +421,9 @@ def scan_fr24_live_radar(now_cst: datetime, forecast_keys: set[str]) -> list[dic
         if ac_code in ULTRA_RARE_TYPES:
             reasons.append(f"🚨 殿堂级极稀有机型实时在空: {ULTRA_RARE_TYPES[ac_code]}")
             category, is_ultra = category or "RARE_ULTRA", True
+        if is_comac_factory_aircraft(ac_code, reg, "", "", callsign, flt):
+            reasons.append(f"🚨 中国商飞 COMAC 自持/试飞演示机实时在空 ({reg or callsign})")
+            category, is_ultra = category or "RARE_ULTRA", True
         if not is_ultra and matches_prefix(callsign, GOV_MIL_CALLSIGN_PREFIXES):
             reasons.append(f"🏛️ 政府/军政呼号实时进京 ({callsign})")
             category = category or "VIP_GOV"
@@ -475,6 +498,9 @@ def scan_adsb_lol(now_cst: datetime) -> list[dict]:
             category, is_ultra = category or "VIP_ULTRA", True
         if ac_type in ULTRA_RARE_TYPES:
             reasons.append(f"🚨 殿堂级极稀有机型现身北京空域: {ULTRA_RARE_TYPES[ac_type]}")
+            category, is_ultra = category or "RARE_ULTRA", True
+        if is_comac_factory_aircraft(ac_type, reg, "", owner, callsign, ""):
+            reasons.append(f"🚨 中国商飞 COMAC 自持/试飞演示机现身北京空域 ({reg or callsign})")
             category, is_ultra = category or "RARE_ULTRA", True
         if not is_ultra and is_low:
             if is_mil or matches_prefix(callsign, GOV_MIL_CALLSIGN_PREFIXES) or any(k in owner.lower() for k in VIP_OWNER_KEYWORDS):
