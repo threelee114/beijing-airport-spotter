@@ -22,6 +22,8 @@ from email.header import Header
 from email.mime.text import MIMEText
 from email.utils import formataddr
 
+from commercial_changes import commercial_number, compare_assignment, family_model
+from liveries import KNOWN_SPECIAL_LIVERIES
 from zh_l10n import zh_aircraft, zh_airline, zh_country, zh_livery, zh_origin
 
 CST = timezone(timedelta(hours=8))
@@ -81,31 +83,6 @@ SPECIAL_LIVERY_KEYWORDS = (
     "smiling", "love china", "winter games", "national games", "peacock",
     "museum", "wuliangye", "zhejiang", "sichuan livery", "city of",
 )
-
-KNOWN_SPECIAL_LIVERIES = {
-    "B-2006": "国航「爱China」彩绘 (B777-300ER)",
-    "B-2032": "国航「微笑中国 / Smiling China」彩绘 (B777-300ER)",
-    "B-2047": "国航「星空联盟 Star Alliance」涂装 (B777-300ER)",
-    "B-308M": "国航「世园号」彩绘 (A350-900)",
-    "B-1083": "国航「爱China」彩绘 (A350-900)",
-    "B-919X": "国航首架五星红旗涂装 C919",
-    "B-2002": "东航「进博号 CIIE」彩绘 (B777-300ER)",
-    "B-919A": "东航全球首架交付 C919（全球首架特别标识）",
-    "B-301D": "川航「熊猫之路」彩绘 (A350-900)",
-    "B-304V": "川航「熊猫之路」彩绘 (A350-900)",
-    "B-304U": "川航「熊猫之路」彩绘 (A350-900)",
-    "B-306N": "川航「大运号」彩绘 (A350-900)",
-    "B-1356": "厦航「联合梦想号 UN SDGs」彩绘 (B787-9)",
-    "B-209R": "吉祥航空「绚彩花瓣」彩绘 (B787-9)",
-    "B-207N": "吉祥航空「梦旅生花」彩绘 (B787-9)",
-    "B-208A": "吉祥航空「丝路飘带」彩绘 (B787-9)",
-    "B-20D1": "吉祥航空「中国牡丹」彩绘 (B787-9)",
-    "B-20EC": "吉祥航空「原神号」彩绘 (B787-9)",
-    "B-1111": "上航「第100架飞机」特别彩绘 (B787-9)",
-    "PH-BVA": "荷航「Orange Pride 橙色骄傲」彩绘 (B777-300ER)",
-    "JA894A": "全日空 ANA「皮卡丘」彩绘 (B787-9)",
-    "B-18101": "中华航空「皮卡丘」彩绘 (A321neo)",
-}
 
 # Routine daily East Asia / HK-TW carriers are lower priority unless rare aircraft or livery
 ROUTINE_REGIONAL_CARRIERS = {"CX", "HX", "UO", "NX", "KE", "OZ", "NH", "JL", "BR", "CI", "SQ", "TG", "VN", "MH", "AK", "VJ", "S7"}
@@ -244,7 +221,9 @@ def fetch_page(airport_code: str, timestamp: int, page: int, limit: int = 100) -
 def parse_flight(entry: dict, airport_code: str, local_tz: timezone = CST) -> dict | None:
     f = entry.get("flight") or {}
     time_info = f.get("time") or {}
-    arr_ts = (time_info.get("scheduled") or {}).get("arrival") or (time_info.get("estimated") or {}).get("arrival")
+    scheduled_ts = (time_info.get("scheduled") or {}).get("arrival")
+    estimated_ts = (time_info.get("estimated") or {}).get("arrival")
+    arr_ts = estimated_ts or scheduled_ts
     if not arr_ts:
         return None
 
@@ -277,11 +256,18 @@ def parse_flight(entry: dict, airport_code: str, local_tz: timezone = CST) -> di
         airline_name, airline_iata, airline_icao = fix
 
     arr_dt = datetime.fromtimestamp(arr_ts, tz=local_tz)
+    scheduled_dt = datetime.fromtimestamp(scheduled_ts, tz=local_tz) if scheduled_ts else None
+    display_time = arr_dt.strftime("%H:%M")
+    if scheduled_dt and scheduled_dt.date() != arr_dt.date():
+        display_time = arr_dt.strftime("%m-%d %H:%M")
     return {
         "airport": airport_code.upper(),
+        "scheduled_ts": scheduled_ts,
+        "estimated_ts": estimated_ts,
+        "scheduled_time": scheduled_dt.strftime("%H:%M") if scheduled_dt else "",
         "arrival_ts": arr_ts,
         "arrival_cst": arr_dt.strftime("%Y-%m-%d %H:%M"),
-        "arrival_time": arr_dt.strftime("%H:%M"),
+        "arrival_time": display_time,
         "flight_number": flight_num,
         "callsign": callsign,
         "airline": airline_name,
@@ -314,9 +300,11 @@ def fetch_airport_for_date(airport_code: str, target_date: datetime) -> dict:
     errors = []
     max_seen_ts = 0
     meta_loaded = False
+    received_data = False
+    forbidden = False
 
     for anchor in anchor_timestamps:
-        if max_seen_ts >= end_ts:
+        if forbidden or max_seen_ts >= end_ts:
             break
         page = 1
         while page <= 12:
@@ -324,18 +312,7 @@ def fetch_airport_for_date(airport_code: str, target_date: datetime) -> dict:
                 payload = fetch_page(airport_code, anchor, page, limit=100)
             except Exception as exc:
                 errors.append(str(exc))
-                if "403" in str(exc):
-                    return {
-                        "airport": airport_code.upper(),
-                        "airport_name": airport_name,
-                        "lat": lat, "lon": lon, "tz_offset_sec": tz_offset_sec,
-                        "date": start_dt.strftime("%Y-%m-%d"),
-                        "total_flights": 0,
-                        "first_arrival": None,
-                        "last_arrival": None,
-                        "errors": errors,
-                        "flights": [],
-                    }
+                forbidden = "403" in str(exc)
                 break
             try:
                 plugin_data = payload["result"]["response"]["airport"]["pluginData"]
@@ -355,30 +332,43 @@ def fetch_airport_for_date(airport_code: str, target_date: datetime) -> dict:
                         end_ts = int(end_dt.timestamp())
                     meta_loaded = True
                 arrivals = plugin_data["schedule"]["arrivals"]
-            except (KeyError, TypeError):
+                rows = arrivals["data"]
+                if not isinstance(rows, list):
+                    raise TypeError("arrivals.data must be a list")
+                total_pages = int((arrivals.get("page") or {}).get("total") or 1)
+            except (KeyError, TypeError, AttributeError, ValueError) as exc:
+                errors.append(f"Invalid arrivals response (page {page}): {exc}")
                 break
-            rows = arrivals.get("data") or []
             if not rows:
+                received_data = True
                 break
 
             page_min_ts = None
             page_max_ts = None
             for row in rows:
-                parsed = parse_flight(row, airport_code, local_tz)
+                try:
+                    parsed = parse_flight(row, airport_code, local_tz)
+                except (AttributeError, TypeError, ValueError, OverflowError, OSError) as exc:
+                    errors.append(f"Invalid arrival (page {page}): {exc}")
+                    continue
+                received_data = True
                 if not parsed:
                     continue
-                ts = parsed["arrival_ts"]
+                # Page boundaries and service dates follow the published schedule, even for delays past midnight.
+                ts = parsed["scheduled_ts"] or parsed["arrival_ts"]
                 page_min_ts = ts if page_min_ts is None else min(page_min_ts, ts)
                 page_max_ts = ts if page_max_ts is None else max(page_max_ts, ts)
                 max_seen_ts = max(max_seen_ts, ts)
                 if start_ts <= ts <= end_ts:
-                    k = (parsed["flight_number"] or parsed["callsign"], parsed["arrival_ts"], parsed["origin_iata"])
+                    k = (parsed["flight_number"] or parsed["callsign"], ts, parsed["origin_iata"])
                     if k not in seen_keys:
                         seen_keys.add(k)
                         flights.append(parsed)
 
-            total_pages = (arrivals.get("page") or {}).get("total") or 1
             if (page_min_ts and page_min_ts > end_ts) or (page_max_ts and page_max_ts >= end_ts) or page >= total_pages:
+                break
+            if page == 12:
+                errors.append("Reached page limit before the end of the requested date")
                 break
             page += 1
             time.sleep(0.25)
@@ -394,6 +384,7 @@ def fetch_airport_for_date(airport_code: str, target_date: datetime) -> dict:
         "total_flights": len(flights),
         "first_arrival": flights[0]["arrival_time"] if flights else None,
         "last_arrival": flights[-1]["arrival_time"] if flights else None,
+        "status": "success" if not errors else ("partial" if received_data else "failed"),
         "errors": errors,
         "flights": flights,
     }
@@ -411,6 +402,8 @@ def analyze_flights(airport_result: dict) -> dict:
     c919_count = 0
     c919_highlights = []
 
+    commercial = {}
+    leg_counts = Counter((f["flight_number"], f["origin_iata"]) for f in flights)
     for f in flights:
         airline_raw = f["airline"] or ""
         airline_lower = (airline_raw + " " + f["owner"]).lower()
@@ -426,7 +419,9 @@ def analyze_flights(airport_result: dict) -> dict:
 
         # 1. Special liveries
         livery_reasons = []
-        if "(" in airline_raw:
+        if reg in KNOWN_SPECIAL_LIVERIES:
+            livery_reasons.append(f"🎨 {KNOWN_SPECIAL_LIVERIES[reg]}")
+        elif "(" in airline_raw:
             s_i = airline_raw.find("(") + 1
             e_i = airline_raw.rfind(")")
             p_txt = (airline_raw[s_i:e_i] if e_i > s_i else airline_raw[s_i:]).strip()
@@ -435,8 +430,6 @@ def analyze_flights(airport_result: dict) -> dict:
                 livery_reasons.append(f"🎨 {zh_livery(p_txt)}")
         elif any(kw in airline_raw.lower() for kw in SPECIAL_LIVERY_KEYWORDS):
             livery_reasons.append(f"🎨 {zh_livery(airline_raw)}")
-        elif reg in KNOWN_SPECIAL_LIVERIES:
-            livery_reasons.append(f"🎨 {KNOWN_SPECIAL_LIVERIES[reg]}")
         if livery_reasons:
             special_liveries.append({**f, "reasons": livery_reasons})
 
@@ -456,11 +449,29 @@ def analyze_flights(airport_result: dict) -> dict:
                 reasons.append("📋 无常规商业航班号（疑为包机/调机）")
             vip_or_unusual.append({**f, "reasons": reasons})
 
+        # Match a scheduled commercial leg across scans even when its ETA or registration changes.
+        model_family = ""
+        if (commercial_number(f["flight_number"], iata)
+                and not (is_vip_kw or is_bizjet or f["restricted"] or reg in ULTRA_VIP_REGS)
+                and not f["callsign"].startswith(ULTRA_VIP_CALLSIGN_PREFIXES)
+                and leg_counts[f["flight_number"], f["origin_iata"]] == 1):
+            model_family = family_model(ac_code, f["aircraft_text"])
+            leg = "/".join((f["airport"], f["flight_number"], f["origin_iata"]))
+            commercial[leg] = {
+                "reg": reg, "livery": livery_reasons[0].removeprefix("🎨 ") if livery_reasons else "",
+                "model": model_family or SPECIAL_AIRCRAFT_CODES.get(ac_code, ""),
+                "equipment": ac_code or f["aircraft_text"], "arrival": f["arrival_ts"],
+                "estimated": bool(f["estimated_ts"]),
+            }
+
         # 3. Special / iconic aircraft (plus COMAC factory C919 test/demo frames)
         if is_comac_factory_aircraft(ac_code, reg, airline_raw, f["owner"], f["callsign"], f["flight_number"]):
             special_aircraft.append({**f, "reasons": ["🚨 中国商飞 COMAC 自持/试飞演示机（24h直通）"]})
         elif ac_code in SPECIAL_AIRCRAFT_CODES:
             special_aircraft.append({**f, "reasons": [f"✈️ {SPECIAL_AIRCRAFT_CODES[ac_code]}"]})
+
+        elif model_family:
+            special_aircraft.append({**f, "reasons": [f"✈️ 重点机型 {model_family}"]})
 
         # 4. International or widebody cargo
         is_cargo = any(kw in airline_lower for kw in CARGO_KEYWORDS) or ac_code in {"B77F", "77X", "75F", "74Y", "74F", "74N", "76F", "A33F", "MD11"}
@@ -478,6 +489,7 @@ def analyze_flights(airport_result: dict) -> dict:
                 })
 
     return {
+        "commercial": commercial,
         "airport": airport_result["airport"],
         "airport_name": airport_result.get("airport_name") or zh_origin(airport_result["airport"]),
         "lat": airport_result.get("lat", BEIJING_LAT),
@@ -487,6 +499,7 @@ def analyze_flights(airport_result: dict) -> dict:
         "total_flights": airport_result["total_flights"],
         "first_arrival": airport_result["first_arrival"],
         "last_arrival": airport_result["last_arrival"],
+        "status": airport_result["status"],
         "errors": airport_result["errors"],
         "c919_count": c919_count,
         "c919_highlights": c919_highlights,
@@ -545,13 +558,18 @@ def is_ultra_special(f: dict) -> bool:
     )
 
 
-def split_by_daylight(items: list[dict], win_start: datetime, win_end: datetime) -> tuple[list[dict], list[dict]]:
+def split_by_daylight(items: list[dict], win_start: datetime, win_end: datetime, airport: dict) -> tuple[list[dict], list[dict]]:
     """Split items into (main_shootable_or_ultra, dark_filtered_reference)."""
     main_list, dark_list = [], []
     for f in items:
-        arr_dt = datetime.fromtimestamp(f["arrival_ts"], tz=CST)
-        if (win_start < arr_dt < win_end) or is_ultra_special(f):
-            main_list.append(f)
+        arr_dt = datetime.fromtimestamp(f["arrival_ts"], tz=win_start.tzinfo)
+        start, end = win_start, win_end
+        if arr_dt.date().isoformat() != airport["date"]:
+            sunrise, sunset = airport_sunrise_sunset(arr_dt, airport["lat"], airport["lon"])
+            start, end = sunrise - timedelta(hours=1), sunset + timedelta(hours=1)
+        shootable = start < arr_dt < end
+        if shootable or is_ultra_special(f):
+            main_list.append({**f, "shootable": shootable})
         else:
             dark_list.append(f)
     return main_list, dark_list
@@ -561,18 +579,15 @@ def esc(s: str) -> str:
     return html.escape(str(s or ""))
 
 
-def render_rows(items: list[dict], win_start: datetime, win_end: datetime, empty_msg: str, muted: bool = False) -> str:
+def render_rows(items: list[dict], empty_msg: str, muted: bool = False) -> str:
     if not items:
         return f'<tr><td colspan="5" style="border:1px solid #e2e8f0;padding:10px;color:#64748b;text-align:center;">{esc(empty_msg)}</td></tr>'
     out = []
     for f in items:
-        arr_dt = datetime.fromtimestamp(f["arrival_ts"], tz=CST)
-        shootable = win_start < arr_dt < win_end
-        ultra = is_ultra_special(f)
         if muted:
             bg = "#f8fafc"
             tag = ' <span style="font-size:11px;color:#64748b;">🌙夜间</span>'
-        elif ultra and not shootable:
+        elif not f["shootable"]:
             bg = "#fef2f2"
             tag = ' <span style="font-size:11px;color:#b91c1c;">🚨直通</span>'
         else:
@@ -583,9 +598,14 @@ def render_rows(items: list[dict], win_start: datetime, win_end: datetime, empty
         ac_disp = zh_aircraft(f["aircraft_text"], f["aircraft_code"])
         airline_disp = zh_airline(f["airline"], f["airline_iata"], f["owner"])
         orig_disp = zh_origin(f["origin_iata"], f["origin_city"], f["origin_country"])
+        planned = ""
+        if f.get("scheduled_time") and f["scheduled_time"] != f["arrival_time"]:
+            planned = f'<br><small>原定 {esc(f["scheduled_time"])}</small>'
+        elif not f.get("estimated_ts"):
+            planned = " <small>计划</small>"
         out.append(f"""
         <tr style="background-color:{bg};">
-          <td style="border:1px solid #e2e8f0;padding:7px;white-space:nowrap;"><strong>{esc(f['arrival_time'])}</strong>{tag}</td>
+          <td style="border:1px solid #e2e8f0;padding:7px;white-space:nowrap;"><strong>{esc(f['arrival_time'])}</strong>{tag}{planned}</td>
           <td style="border:1px solid #e2e8f0;padding:7px;"><strong>{esc(flt)}</strong></td>
           <td style="border:1px solid #e2e8f0;padding:7px;">{esc(airline_disp)}<br><span style="color:#64748b;font-size:12px;">{esc(orig_disp)}</span></td>
           <td style="border:1px solid #e2e8f0;padding:7px;">{esc(ac_disp)}{reg_html}</td>
@@ -631,7 +651,7 @@ def merge_dark_reference(dark_by_airport: list[tuple[str, list[dict]]]) -> list[
 def build_html(summary: dict, target_dt: datetime, edition_label: str = "次日亮点与彩绘到港汇总") -> str:
     airports = summary["airports"]
     codes = list(airports.keys())
-    first_ap = airports[codes[0]]
+    first_ap = next(ap for ap in airports.values() if ap["status"] != "failed")
     local_tz = timezone(timedelta(seconds=first_ap.get("tz_offset_sec", 28800)))
     sunrise, sunset = airport_sunrise_sunset(
         target_dt.replace(tzinfo=local_tz),
@@ -671,7 +691,12 @@ def build_html(summary: dict, target_dt: datetime, edition_label: str = "次日�
 
     for code in codes:
         ap = airports[code]
+        checked = esc(ap["checked_at_cst"])
         ap_name = ap.get("airport_name") or zh_origin(code)
+        display_airport = f"{esc(ap_name)} · {esc(code)}" if ap_name != code else esc(code)
+        if ap["status"] == "failed":
+            scan_stats.append(f"{display_airport} 抓取失败（尝试时间 {checked}）")
+            continue
         ap_tz = timezone(timedelta(seconds=ap.get("tz_offset_sec", 28800)))
         ap_sr, ap_ss = airport_sunrise_sunset(
             target_dt.replace(tzinfo=ap_tz),
@@ -680,11 +705,12 @@ def build_html(summary: dict, target_dt: datetime, edition_label: str = "次日�
         )
         ap_ws, ap_we = ap_sr - timedelta(hours=1), ap_ss + timedelta(hours=1)
 
-        liv_main, liv_dark = split_by_daylight(ap["special_liveries"], ap_ws, ap_we)
-        hi_main, hi_dark = split_by_daylight(merge_highlights(ap), ap_ws, ap_we)
+        liv_main, liv_dark = split_by_daylight(ap["special_liveries"], ap_ws, ap_we, ap)
+        hi_main, hi_dark = split_by_daylight(merge_highlights(ap), ap_ws, ap_we, ap)
         dark_by_airport.append((code, liv_dark + hi_dark))
 
-        scan_stats.append(f"{code} {ap['total_flights']} 班")
+        coverage = "（部分数据）" if ap["status"] == "partial" else "（抓取完整）"
+        scan_stats.append(f"{display_airport} {ap['total_flights']} 班{coverage} 抓取时间 {checked}")
         livery_stats.append(f"{code} {len(liv_main)} 班")
         if ap.get("c919_count"):
             c919_parts.append(
@@ -696,17 +722,22 @@ def build_html(summary: dict, target_dt: datetime, edition_label: str = "次日�
     <h3 style="margin:14px 0 6px 0;color:#0f172a;">🎨 {esc(ap_name)} 可拍时段彩绘（{len(liv_main)} 班）</h3>
     <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:14px;">
       {thead_livery}
-      <tbody>{render_rows(liv_main, ap_ws, ap_we, f'可拍时段内暂未检出已排机 {code} 彩绘')}</tbody>
+      <tbody>{render_rows(liv_main, f'可拍时段内暂未检出已排机 {code} 彩绘')}</tbody>
     </table>""")
 
         highlight_sections.append(f"""
     <h3 style="margin:18px 0 8px 0;color:#0f172a;">🛬 {esc(ap_name)} 专机 / 特殊机型 / 罕见航司（{len(hi_main)} 班）</h3>
     <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:18px;">
       {thead_std}
-      <tbody>{render_rows(hi_main, ap_ws, ap_we, f'可拍时段内 {code} 暂无额外特殊机型或低频航司')}</tbody>
+      <tbody>{render_rows(hi_main, f'可拍时段内 {code} 暂无额外特殊机型或低频航司')}</tbody>
     </table>""")
 
     dark_ref = merge_dark_reference(dark_by_airport)
+    changes = summary.get("commercial_changes", [])
+    change_html = ""
+    if changes:
+        rows = "".join(f"<li>{esc(line)}</li>" for line in changes)
+        change_html = f"<h3>民航彩绘与重点机型变更</h3><ul>{rows}</ul>"
     title_codes = " / ".join(codes)
     c919_html = f"<strong>国产 C919 概览：</strong>{esc('；'.join(c919_parts))}。<br>" if c919_parts else ""
 
@@ -720,10 +751,11 @@ def build_html(summary: dict, target_dt: datetime, edition_label: str = "次日�
     </h2>
     <p style="margin:6px 0 16px 0;color:#475569;font-size:13px;">
       <strong>目标日期：</strong>{summary['target_date']}（当地时间） &nbsp;|&nbsp;
-      <strong>扫描规模：</strong>{' / '.join(scan_stats)} &nbsp;|&nbsp;
+      <strong>本次抓取（北京时间）：</strong>{' / '.join(scan_stats)} &nbsp;|&nbsp;
       <strong>当地日出/日落：</strong>{sunrise.strftime('%H:%M')} / {sunset.strftime('%H:%M')}（主区仅展示可拍窗口 <strong>{win_start.strftime('%H:%M')}–{win_end.strftime('%H:%M')}</strong> 及 🚨24h直通目标）
     </p>
 
+    {change_html}
     {''.join(livery_sections)}
     {''.join(highlight_sections)}
 
@@ -732,7 +764,7 @@ def build_html(summary: dict, target_dt: datetime, edition_label: str = "次日�
       <p style="margin:0 0 10px 0;font-size:12px;color:#64748b;">以下航班落于暗光时段（常规不建议拍机），单独归档在此供查漏参考；MD-11/DC-10/AF1/IL-96/AN-124 等直通目标不受此过滤。</p>
       <table style="width:100%;border-collapse:collapse;font-size:12px;color:#475569;">
         {thead_std}
-        <tbody>{render_rows(dark_ref, win_start, win_end, '夜间时段无额外亮点航班', muted=True)}</tbody>
+        <tbody>{render_rows(dark_ref, '夜间时段无额外亮点航班', muted=True)}</tbody>
       </table>
     </div>
 
@@ -771,25 +803,18 @@ def send_smtp(subject: str, html_body: str, config_path: str | None = None) -> N
     print(f"DAILY_DIGEST_SENT_OK: {subject} (count={len(recipients)})")
 
 
-def load_previous_sent_keys(arrivals_path: str, target_date: str) -> set[tuple[str, str, str]]:
-    """Load (airport, flight_number, registration) already reported in last evening's digest for target_date."""
-    keys = set()
-    if not os.path.exists(arrivals_path):
-        return keys
-    try:
-        with open(arrivals_path, "r", encoding="utf-8") as fh:
-            prev = json.load(fh)
-        if prev.get("target_date") != target_date:
-            return keys
-        for code, ap in (prev.get("airports") or {}).items():
-            for cat in ("special_liveries", "vip_or_unusual", "special_aircraft", "intl_cargo", "rare_airlines"):
-                for f in ap.get(cat) or []:
-                    flt = (f.get("flight_number") or f.get("callsign") or "").upper()
-                    reg = (f.get("registration") or "").upper()
-                    keys.add((code.upper(), flt, reg))
-    except Exception:
-        pass
-    return keys
+HIGHLIGHT_CATEGORIES = ("special_liveries", "vip_or_unusual", "special_aircraft", "intl_cargo", "rare_airlines")
+
+
+def flight_key(code: str, flight: dict) -> tuple[str, str, str]:
+    return (code.upper(), (flight["flight_number"] or flight["callsign"]).upper(), flight["registration"].upper())
+
+
+def write_json(path: str, data) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path + ".tmp", "w", encoding="utf-8") as fh:
+        json.dump(data, fh, ensure_ascii=False, indent=2)
+    os.replace(path + ".tmp", path)
 
 
 def filter_summary_diff(summary: dict, prev_keys: set[tuple[str, str, str]], min_hour: int | None = None) -> tuple[dict, int]:
@@ -800,18 +825,17 @@ def filter_summary_diff(summary: dict, prev_keys: set[tuple[str, str, str]], min
         new_ap = {**ap}
         ap_tz = timezone(timedelta(seconds=ap.get("tz_offset_sec", 28800)))
         ap_seen = set()
-        for cat in ("special_liveries", "vip_or_unusual", "special_aircraft", "intl_cargo", "rare_airlines"):
+        for cat in HIGHLIGHT_CATEGORIES:
             kept = []
             for f in ap.get(cat) or []:
                 if min_hour is not None:
                     arr_local = datetime.fromtimestamp(f["arrival_ts"], tz=ap_tz)
                     if arr_local.hour < min_hour:
                         continue
-                flt = (f.get("flight_number") or f.get("callsign") or "").upper()
-                reg = (f.get("registration") or "").upper()
-                if (not prev_keys) or ((code.upper(), flt, reg) not in prev_keys):
+                key = flight_key(code, f)
+                if key not in prev_keys:
                     kept.append(f)
-                    ap_seen.add((flt, reg, f.get("arrival_ts")))
+                    ap_seen.add((*key, f["arrival_ts"]))
             new_ap[cat] = kept
         new_count += len(ap_seen)
         new_summary["airports"][code] = new_ap
@@ -851,16 +875,75 @@ def main() -> int:
         "target_date": target_dt.strftime("%Y-%m-%d"),
         "airports": {},
     }
+    observations = {}
     for code in airport_codes:
         raw = fetch_airport_for_date(code, target_dt)
-        summary["airports"][code] = analyze_flights(raw)
+        checked_at = datetime.now(CST)
+        ap = analyze_flights(raw)
+        ap["checked_at_cst"] = checked_at.strftime("%Y-%m-%d %H:%M")
+        observations.update(ap.pop("commercial"))
+        summary["airports"][code] = ap
 
-    os.makedirs(args.state_dir, exist_ok=True)
+        if raw["errors"]:
+            print(f"{code} ({raw['status']}): {' | '.join(dict.fromkeys(raw['errors']))}", file=sys.stderr)
+    statuses = {ap["status"] for ap in summary["airports"].values()}
+    if statuses == {"failed"}:
+        return 1
+
+    # Only successful deliveries populate this ledger. A legacy scan has no delivery evidence.
+    sent_dir = os.environ.get("DIGEST_SENT_DIR") or os.path.join(args.state_dir, "sent")
+    sent_path = os.path.join(sent_dir, summary["target_date"] + ".json")
+    prev_keys = set()
+    if os.path.exists(sent_path):
+        with open(sent_path, encoding="utf-8") as fh:
+            prev_keys = {tuple(key) for key in json.load(fh)}
     arrivals_path = os.path.join(args.state_dir, "arrivals.json")
 
+    # The receipt cache is private to the digest. Keep today's and tomorrow's comparisons
+    # available when a manual run requests a different service date.
+    baseline_path = os.path.join(sent_dir, "commercial.json")
+    history = {}
+    if os.path.exists(baseline_path):
+        with open(baseline_path, encoding="utf-8") as fh:
+            history = json.load(fh)
+    service_date = summary["target_date"]
+    previous = history.get(service_date, {})
+    updated = dict(previous)
+    changes = []
+    for leg, current in observations.items():
+        code, flight, origin = leg.split("/", 2)
+        old = previous.get(leg)
+        ap = summary["airports"][code]
+        tz = timezone(timedelta(seconds=ap["tz_offset_sec"]))
+        if old is None:
+            aligned, messages = current, []
+            if current["model"] and previous:
+                messages.append(f"本次检出重点机型：{current['model']}")
+        else:
+            aligned, messages = compare_assignment(old, current, tz)
+        if args.diff_only and messages:
+            arrivals = [aligned["arrival"]]
+            if old:
+                arrivals.append(old["arrival"])
+            if args.min_hour is not None:
+                cutoff = target_dt.replace(tzinfo=tz).timestamp() + args.min_hour * 3600
+                if max(arrivals) < cutoff:
+                    continue
+            # Include moves out of daylight when the previously reported time was shootable.
+            for ts in arrivals:
+                local = datetime.fromtimestamp(ts, tz)
+                sunrise, sunset = airport_sunrise_sunset(local, ap["lat"], ap["lon"])
+                if sunrise - timedelta(hours=1) < local < sunset + timedelta(hours=1):
+                    break
+            else:
+                continue
+            route = f"{origin} → {code}" if origin else code
+            when = datetime.fromtimestamp(aligned["arrival"], tz).strftime("%m-%d %H:%M")
+            changes.append(f"{flight}（{route}，{when}） · " + "；".join(messages))
+        updated[leg] = aligned
+    summary["commercial_changes"] = changes
     render_summary = summary
     if args.diff_only:
-        prev_keys = load_previous_sent_keys(arrivals_path, summary["target_date"])
         render_summary, new_count = filter_summary_diff(summary, prev_keys, min_hour=args.min_hour)
         # Also check if any new item is in shootable window or ultra-special (ignore dark-only noise in morning diff)
         shootable_new = 0
@@ -868,21 +951,13 @@ def main() -> int:
             ap_tz = timezone(timedelta(seconds=ap.get("tz_offset_sec", 28800)))
             sr, ss = airport_sunrise_sunset(target_dt.replace(tzinfo=ap_tz), ap.get("lat", BEIJING_LAT), ap.get("lon", BEIJING_LON))
             ws, we = sr - timedelta(hours=1), ss + timedelta(hours=1)
-            lm, _ = split_by_daylight(ap["special_liveries"], ws, we)
-            hm, _ = split_by_daylight(merge_highlights(ap), ws, we)
+            lm, _ = split_by_daylight(ap["special_liveries"], ws, we, ap)
+            hm, _ = split_by_daylight(merge_highlights(ap), ws, we, ap)
             shootable_new += len(lm) + len(hm)
         print(f"DIFF_ONLY check: prev_keys={len(prev_keys)}, total_new={new_count}, shootable_or_ultra_new={shootable_new}")
-        # Always refresh full state cache so live_alert stays up to date
-        if set(airport_codes) & {"PEK", "PKX"}:
-            with open(arrivals_path, "w", encoding="utf-8") as fh:
-                json.dump(summary, fh, ensure_ascii=False, indent=2)
-        if shootable_new == 0:
+        if shootable_new == 0 and not changes and statuses == {"success"}:
             print("DIFF_ONLY: No new shootable or ultra-special arrivals found. Skipping email.")
             return 0
-    else:
-        if set(airport_codes) & {"PEK", "PKX"}:
-            with open(arrivals_path, "w", encoding="utf-8") as fh:
-                json.dump(summary, fh, ensure_ascii=False, indent=2)
 
     html_body = build_html(render_summary, target_dt, edition_label=edition_label)
     if args.html_out:
@@ -903,6 +978,15 @@ def main() -> int:
     codes_str = "/".join(airport_codes)
     subject = f"机场({codes_str}){edition_label} - {summary['target_date']}"
     send_smtp(subject, html_body, args.smtp_config)
+    for code, ap in render_summary["airports"].items():
+        for cat in HIGHLIGHT_CATEGORIES:
+            prev_keys.update(flight_key(code, f) for f in ap[cat])
+    write_json(sent_path, sorted(prev_keys))
+    history[service_date] = updated
+    keep_dates = {service_date, now_cst.date().isoformat(), (now_cst.date() + timedelta(days=1)).isoformat()}
+    write_json(baseline_path, {date: legs for date, legs in history.items() if date in keep_dates})
+    if statuses == {"success"} and set(airport_codes) & {"PEK", "PKX"}:
+        write_json(arrivals_path, summary)
     return 0
 
 

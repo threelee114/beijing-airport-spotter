@@ -20,6 +20,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: daily-digest-runner
+  cancel-in-progress: false
+
 jobs:
   daily-digest:
     runs-on: ubuntu-latest
@@ -41,8 +45,16 @@ jobs:
           restore-keys: |
             spotter-state-
 
+      - name: Cache successful digest deliveries separately from scan results
+        uses: actions/cache@v4
+        with:
+          path: digest-receipts
+          key: digest-receipts-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: digest-receipts-
+
       - name: Run arrivals & liveries digest
         env:
+          DIGEST_SENT_DIR: digest-receipts
           SMTP_163_USER: ${{ secrets.SMTP_163_USER }}
           SMTP_163_AUTH_CODE: ${{ secrets.SMTP_163_AUTH_CODE }}
           ALERT_TO_EMAIL: ${{ secrets.ALERT_TO_EMAIL }}
