@@ -22,6 +22,7 @@ from email.header import Header
 from email.mime.text import MIMEText
 from email.utils import formataddr
 
+from commercial_changes import commercial_number, compare_assignment, family_model
 from liveries import KNOWN_SPECIAL_LIVERIES
 from zh_l10n import zh_aircraft, zh_airline, zh_country, zh_livery, zh_origin
 
@@ -401,6 +402,8 @@ def analyze_flights(airport_result: dict) -> dict:
     c919_count = 0
     c919_highlights = []
 
+    commercial = {}
+    leg_counts = Counter((f["flight_number"], f["origin_iata"]) for f in flights)
     for f in flights:
         airline_raw = f["airline"] or ""
         airline_lower = (airline_raw + " " + f["owner"]).lower()
@@ -446,11 +449,29 @@ def analyze_flights(airport_result: dict) -> dict:
                 reasons.append("📋 无常规商业航班号（疑为包机/调机）")
             vip_or_unusual.append({**f, "reasons": reasons})
 
+        # Match a scheduled commercial leg across scans even when its ETA or registration changes.
+        model_family = ""
+        if (commercial_number(f["flight_number"], iata)
+                and not (is_vip_kw or is_bizjet or f["restricted"] or reg in ULTRA_VIP_REGS)
+                and not f["callsign"].startswith(ULTRA_VIP_CALLSIGN_PREFIXES)
+                and leg_counts[f["flight_number"], f["origin_iata"]] == 1):
+            model_family = family_model(ac_code, f["aircraft_text"])
+            leg = "/".join((f["airport"], f["flight_number"], f["origin_iata"]))
+            commercial[leg] = {
+                "reg": reg, "livery": livery_reasons[0].removeprefix("🎨 ") if livery_reasons else "",
+                "model": model_family or SPECIAL_AIRCRAFT_CODES.get(ac_code, ""),
+                "equipment": ac_code or f["aircraft_text"], "arrival": f["arrival_ts"],
+                "estimated": bool(f["estimated_ts"]),
+            }
+
         # 3. Special / iconic aircraft (plus COMAC factory C919 test/demo frames)
         if is_comac_factory_aircraft(ac_code, reg, airline_raw, f["owner"], f["callsign"], f["flight_number"]):
             special_aircraft.append({**f, "reasons": ["🚨 中国商飞 COMAC 自持/试飞演示机（24h直通）"]})
         elif ac_code in SPECIAL_AIRCRAFT_CODES:
             special_aircraft.append({**f, "reasons": [f"✈️ {SPECIAL_AIRCRAFT_CODES[ac_code]}"]})
+
+        elif model_family:
+            special_aircraft.append({**f, "reasons": [f"✈️ 重点机型 {model_family}"]})
 
         # 4. International or widebody cargo
         is_cargo = any(kw in airline_lower for kw in CARGO_KEYWORDS) or ac_code in {"B77F", "77X", "75F", "74Y", "74F", "74N", "76F", "A33F", "MD11"}
@@ -468,6 +489,7 @@ def analyze_flights(airport_result: dict) -> dict:
                 })
 
     return {
+        "commercial": commercial,
         "airport": airport_result["airport"],
         "airport_name": airport_result.get("airport_name") or zh_origin(airport_result["airport"]),
         "lat": airport_result.get("lat", BEIJING_LAT),
@@ -669,10 +691,12 @@ def build_html(summary: dict, target_dt: datetime, edition_label: str = "次日�
 
     for code in codes:
         ap = airports[code]
-        if ap["status"] == "failed":
-            scan_stats.append(f"{esc(code)} 抓取失败")
-            continue
+        checked = esc(ap["checked_at_cst"])
         ap_name = ap.get("airport_name") or zh_origin(code)
+        display_airport = f"{esc(ap_name)} · {esc(code)}" if ap_name != code else esc(code)
+        if ap["status"] == "failed":
+            scan_stats.append(f"{display_airport} 抓取失败（尝试时间 {checked}）")
+            continue
         ap_tz = timezone(timedelta(seconds=ap.get("tz_offset_sec", 28800)))
         ap_sr, ap_ss = airport_sunrise_sunset(
             target_dt.replace(tzinfo=ap_tz),
@@ -685,8 +709,8 @@ def build_html(summary: dict, target_dt: datetime, edition_label: str = "次日�
         hi_main, hi_dark = split_by_daylight(merge_highlights(ap), ap_ws, ap_we, ap)
         dark_by_airport.append((code, liv_dark + hi_dark))
 
-        coverage = "（部分数据）" if ap["status"] == "partial" else "（抓取成功）"
-        scan_stats.append(f"{esc(code)} {ap['total_flights']} 班{coverage}")
+        coverage = "（部分数据）" if ap["status"] == "partial" else "（抓取完整）"
+        scan_stats.append(f"{display_airport} {ap['total_flights']} 班{coverage} 抓取时间 {checked}")
         livery_stats.append(f"{code} {len(liv_main)} 班")
         if ap.get("c919_count"):
             c919_parts.append(
@@ -709,6 +733,11 @@ def build_html(summary: dict, target_dt: datetime, edition_label: str = "次日�
     </table>""")
 
     dark_ref = merge_dark_reference(dark_by_airport)
+    changes = summary.get("commercial_changes", [])
+    change_html = ""
+    if changes:
+        rows = "".join(f"<li>{esc(line)}</li>" for line in changes)
+        change_html = f"<h3>民航彩绘与重点机型变更</h3><ul>{rows}</ul>"
     title_codes = " / ".join(codes)
     c919_html = f"<strong>国产 C919 概览：</strong>{esc('；'.join(c919_parts))}。<br>" if c919_parts else ""
 
@@ -722,10 +751,11 @@ def build_html(summary: dict, target_dt: datetime, edition_label: str = "次日�
     </h2>
     <p style="margin:6px 0 16px 0;color:#475569;font-size:13px;">
       <strong>目标日期：</strong>{summary['target_date']}（当地时间） &nbsp;|&nbsp;
-      <strong>扫描规模：</strong>{' / '.join(scan_stats)} &nbsp;|&nbsp;
+      <strong>本次抓取（北京时间）：</strong>{' / '.join(scan_stats)} &nbsp;|&nbsp;
       <strong>当地日出/日落：</strong>{sunrise.strftime('%H:%M')} / {sunset.strftime('%H:%M')}（主区仅展示可拍窗口 <strong>{win_start.strftime('%H:%M')}–{win_end.strftime('%H:%M')}</strong> 及 🚨24h直通目标）
     </p>
 
+    {change_html}
     {''.join(livery_sections)}
     {''.join(highlight_sections)}
 
@@ -845,9 +875,14 @@ def main() -> int:
         "target_date": target_dt.strftime("%Y-%m-%d"),
         "airports": {},
     }
+    observations = {}
     for code in airport_codes:
         raw = fetch_airport_for_date(code, target_dt)
-        summary["airports"][code] = analyze_flights(raw)
+        checked_at = datetime.now(CST)
+        ap = analyze_flights(raw)
+        ap["checked_at_cst"] = checked_at.strftime("%Y-%m-%d %H:%M")
+        observations.update(ap.pop("commercial"))
+        summary["airports"][code] = ap
 
         if raw["errors"]:
             print(f"{code} ({raw['status']}): {' | '.join(dict.fromkeys(raw['errors']))}", file=sys.stderr)
@@ -864,6 +899,49 @@ def main() -> int:
             prev_keys = {tuple(key) for key in json.load(fh)}
     arrivals_path = os.path.join(args.state_dir, "arrivals.json")
 
+    # The receipt cache is private to the digest. Keep today's and tomorrow's comparisons
+    # available when a manual run requests a different service date.
+    baseline_path = os.path.join(sent_dir, "commercial.json")
+    history = {}
+    if os.path.exists(baseline_path):
+        with open(baseline_path, encoding="utf-8") as fh:
+            history = json.load(fh)
+    service_date = summary["target_date"]
+    previous = history.get(service_date, {})
+    updated = dict(previous)
+    changes = []
+    for leg, current in observations.items():
+        code, flight, origin = leg.split("/", 2)
+        old = previous.get(leg)
+        ap = summary["airports"][code]
+        tz = timezone(timedelta(seconds=ap["tz_offset_sec"]))
+        if old is None:
+            aligned, messages = current, []
+            if current["model"] and previous:
+                messages.append(f"本次检出重点机型：{current['model']}")
+        else:
+            aligned, messages = compare_assignment(old, current, tz)
+        if args.diff_only and messages:
+            arrivals = [aligned["arrival"]]
+            if old:
+                arrivals.append(old["arrival"])
+            if args.min_hour is not None:
+                cutoff = target_dt.replace(tzinfo=tz).timestamp() + args.min_hour * 3600
+                if max(arrivals) < cutoff:
+                    continue
+            # Include moves out of daylight when the previously reported time was shootable.
+            for ts in arrivals:
+                local = datetime.fromtimestamp(ts, tz)
+                sunrise, sunset = airport_sunrise_sunset(local, ap["lat"], ap["lon"])
+                if sunrise - timedelta(hours=1) < local < sunset + timedelta(hours=1):
+                    break
+            else:
+                continue
+            route = f"{origin} → {code}" if origin else code
+            when = datetime.fromtimestamp(aligned["arrival"], tz).strftime("%m-%d %H:%M")
+            changes.append(f"{flight}（{route}，{when}） · " + "；".join(messages))
+        updated[leg] = aligned
+    summary["commercial_changes"] = changes
     render_summary = summary
     if args.diff_only:
         render_summary, new_count = filter_summary_diff(summary, prev_keys, min_hour=args.min_hour)
@@ -877,7 +955,7 @@ def main() -> int:
             hm, _ = split_by_daylight(merge_highlights(ap), ws, we, ap)
             shootable_new += len(lm) + len(hm)
         print(f"DIFF_ONLY check: prev_keys={len(prev_keys)}, total_new={new_count}, shootable_or_ultra_new={shootable_new}")
-        if shootable_new == 0 and statuses == {"success"}:
+        if shootable_new == 0 and not changes and statuses == {"success"}:
             print("DIFF_ONLY: No new shootable or ultra-special arrivals found. Skipping email.")
             return 0
 
@@ -904,6 +982,9 @@ def main() -> int:
         for cat in HIGHLIGHT_CATEGORIES:
             prev_keys.update(flight_key(code, f) for f in ap[cat])
     write_json(sent_path, sorted(prev_keys))
+    history[service_date] = updated
+    keep_dates = {service_date, now_cst.date().isoformat(), (now_cst.date() + timedelta(days=1)).isoformat()}
+    write_json(baseline_path, {date: legs for date, legs in history.items() if date in keep_dates})
     if statuses == {"success"} and set(airport_codes) & {"PEK", "PKX"}:
         write_json(arrivals_path, summary)
     return 0

@@ -121,3 +121,92 @@ class DigestTests(unittest.TestCase):
         _, second = self.run_digest("--diff-only", response=fetch)
         self.assertIn("CA456", second.call_args.args[1])
         self.assertNotIn("CA123", second.call_args.args[1])
+
+    def commercial(self, model="A320", reg="B-TEST", minutes=0):
+        flight = row(airline="Air China", reg=reg)
+        flight["flight"]["aircraft"]["model"] = {"code": model}
+        flight["flight"]["time"]["estimated"] = {"arrival": int(DAY.replace(hour=13).timestamp()) + minutes * 60}
+        return flight
+
+    def deliver(self, *flights, diff=False, smtp_error=None):
+        _, mail = self.run_digest(*(["--diff-only"] if diff else []),
+                                  response=lambda *a, **k: page(list(flights)), smtp_error=smtp_error)
+        return mail.call_args.args[1] if mail.called else ""
+
+    def test_livery_change_pending_and_confirmed_replacement(self):
+        self.deliver(self.commercial())
+        self.assertIn("换上彩绘", self.deliver(self.commercial(reg="B-2006"), diff=True))
+        uncertain = self.deliver(self.commercial(reg=""), diff=True)
+        self.assertIn("注册号待确认", uncertain)
+        self.assertNotIn("原定彩绘已换走", uncertain)
+        self.assertEqual(self.deliver(self.commercial(reg=""), diff=True), "")
+        self.assertIn("原定彩绘已换走", self.deliver(self.commercial(reg="B-NEW"), diff=True))
+
+    def test_model_changes_and_eta_retries(self):
+        self.deliver(self.commercial())
+        for model, name in (("342", "A340-200"), ("B748", "747-8"), ("388", "A380-800")):
+            body = self.deliver(self.commercial(model), diff=True)
+            self.assertIn("重点机型", body)
+            self.assertIn(name, body)
+        with self.assertRaisesRegex(RuntimeError, "SMTP"):
+            self.deliver(self.commercial("A388", minutes=45), diff=True, smtp_error=RuntimeError("SMTP"))
+        body = self.deliver(self.commercial("A388", minutes=45), diff=True)
+        self.assertIn("推迟 45 分钟", body)
+        self.assertIn("13:45", body)
+        self.assertEqual(self.deliver(self.commercial("388", minutes=45), diff=True), "")
+        self.assertIn("重点机型已换走", self.deliver(self.commercial(), diff=True))
+
+    def test_missing_flight_is_not_a_swap(self):
+        self.deliver(self.commercial("B744", reg="B-2006"))
+        self.assertEqual(self.deliver(diff=True), "")
+        self.assertIn("推迟 45 分钟", self.deliver(self.commercial("B744", reg="B-2006", minutes=45), diff=True))
+
+    def test_header_reports_when_each_airport_was_checked(self):
+        def fetch(airport, *a, **k):
+            if airport == "PKX":
+                raise RuntimeError("403")
+            return page([])
+        _, smtp = self.run_digest(airports="PEK,PKX", response=fetch)
+        header = smtp.call_args.args[1].split("<h3")[0]
+        self.assertRegex(header, r"PEK 0 班.*?抓取完整.*?\d{2}:\d{2}")
+        self.assertRegex(header, r"PKX 抓取失败.*?\d{2}:\d{2}")
+        self.assertIn("北京时间", header)
+
+    def test_airports_do_not_share_a_change_baseline(self):
+        self.deliver(self.commercial("B744", reg="B-2006"))
+        self.run_digest(airports="PKX", response=lambda *a, **k: page([self.commercial()]))
+        _, mail = self.run_digest("--diff-only", airports="PKX", response=lambda *a, **k: page([self.commercial()]))
+        mail.assert_not_called()
+        self.assertIn("重点机型已换走", self.deliver(self.commercial(), diff=True))
+
+    def test_live_commercial_arrivals_share_equipment_aliases(self):
+        import live_alert
+        flight = self.commercial("74H")
+        flight["flight"]["status"] = {"live": True}
+        def fetch(url, **kwargs):
+            return page([flight] if "code=pek" in url and "page=1" in url else [])
+        with patch.object(live_alert, "http_get_json", side_effect=fetch):
+            alerts = live_alert.scan_fr24_live_arrivals(DAY.replace(hour=12), set())
+            self.assertEqual(len(alerts), 1)
+            self.assertIn("747-8", " ".join(alerts[0]["reasons"]))
+            known = {"FLTR:CA123:B-TEST"}
+            self.assertEqual(live_alert.scan_fr24_live_arrivals(DAY.replace(hour=12), known), [])
+
+    def test_first_comparison_and_ordinary_eta_do_not_create_a_change(self):
+        self.assertNotIn("民航彩绘与重点机型变更", self.deliver(self.commercial()))
+        self.assertEqual(self.deliver(self.commercial(minutes=45), diff=True), "")
+
+    def test_model_can_be_identified_by_its_description(self):
+        f = self.commercial("")
+        f["flight"]["aircraft"]["model"]["text"] = "Boeing 747-400F"
+        self.assertIn("重点机型 747-400F", self.deliver(f))
+
+    def test_eta_change_from_daylight_to_night_is_reported(self):
+        self.deliver(self.commercial("A342"))
+        self.assertIn("推迟 480 分钟", self.deliver(self.commercial("A342", minutes=480), diff=True))
+
+    def test_heavy_aircraft_swap_within_same_model(self):
+        self.deliver(self.commercial("74N", reg="B-OLD"))
+        body = self.deliver(self.commercial("74N", reg="B-NEW"), diff=True)
+        self.assertIn("重点机型换机：747-8F，B-OLD → B-NEW", body)
+        self.assertEqual(self.deliver(self.commercial("74N", reg="B-NEW"), diff=True), "")

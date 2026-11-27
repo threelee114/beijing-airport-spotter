@@ -20,6 +20,7 @@ from email.header import Header
 from email.mime.text import MIMEText
 from email.utils import formataddr
 
+from commercial_changes import commercial_number, family_model
 from liveries import KNOWN_SPECIAL_LIVERIES
 from zh_l10n import zh_aircraft, zh_airline, zh_livery, zh_origin
 
@@ -322,8 +323,14 @@ def scan_fr24_live_arrivals(now_cst: datetime, forecast_keys: set[str]) -> list[
                 if livery_desc and is_live and not already_forecasted:
                     reasons.append(f"🎨 临期上线/新增彩绘: {zh_livery(livery_desc)}")
                     category = category or "LIVERY_POPUP"
-                if ac_code in RARE_POPUP_TYPES and is_live and not already_forecasted:
-                    reasons.append(f"✈️ 临期/新增稀有机型: {RARE_POPUP_TYPES[ac_code]}")
+                popup_model = RARE_POPUP_TYPES.get(ac_code)
+                if (not popup_model and commercial_number(flt, airline_iata) and not restricted
+                        and category not in {"VIP_ULTRA", "VIP_GOV"} and not is_ultra
+                        and not matches_prefix(callsign, GOV_MIL_CALLSIGN_PREFIXES)
+                        and not any(k in combined_op for k in VIP_OWNER_KEYWORDS)):
+                    popup_model = family_model(ac_code, ac_text)
+                if popup_model and is_live and not already_forecasted:
+                    reasons.append(f"✈️ 临期/新增稀有机型: {popup_model}")
                     category = category or "RARE_POPUP"
 
                 if reasons:
