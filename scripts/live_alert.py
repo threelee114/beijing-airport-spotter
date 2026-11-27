@@ -20,6 +20,7 @@ from email.header import Header
 from email.mime.text import MIMEText
 from email.utils import formataddr
 
+from liveries import KNOWN_SPECIAL_LIVERIES
 from zh_l10n import zh_aircraft, zh_airline, zh_livery, zh_origin
 
 CST = timezone(timedelta(hours=8))
@@ -104,31 +105,6 @@ VIP_OWNER_KEYWORDS = (
     "royal air force", "presidential", "ministry", "defense", "defence",
     "special flight", "republic of",
 )
-
-KNOWN_SPECIAL_LIVERIES = {
-    "B-2006": "国航「爱China」彩绘 (B777-300ER)",
-    "B-2032": "国航「微笑中国」彩绘 (B777-300ER)",
-    "B-2047": "国航「星空联盟」涂装 (B777-300ER)",
-    "B-308M": "国航「世园号」彩绘 (A350-900)",
-    "B-1083": "国航「爱China」彩绘 (A350-900)",
-    "B-919X": "国航首架五星红旗涂装 C919",
-    "B-2002": "东航「进博号 CIIE」彩绘 (B777-300ER)",
-    "B-919A": "东航全球首架交付 C919",
-    "B-301D": "川航「熊猫之路」彩绘 (A350-900)",
-    "B-304V": "川航「熊猫之路」彩绘 (A350-900)",
-    "B-304U": "川航「熊猫之路」彩绘 (A350-900)",
-    "B-306N": "川航「大运号」彩绘 (A350-900)",
-    "B-1356": "厦航「联合梦想号」彩绘 (B787-9)",
-    "B-209R": "吉祥航空「绚彩花瓣」彩绘 (B787-9)",
-    "B-207N": "吉祥航空「梦旅生花」彩绘 (B787-9)",
-    "B-208A": "吉祥航空「丝路飘带」彩绘 (B787-9)",
-    "B-20D1": "吉祥航空「中国牡丹」彩绘 (B787-9)",
-    "B-20EC": "吉祥航空「原神号」彩绘 (B787-9)",
-    "B-1111": "上航「第100架飞机」彩绘 (B787-9)",
-    "PH-BVA": "荷航「Orange Pride 橙色骄傲」彩绘 (B777-300ER)",
-    "JA894A": "全日空 ANA「皮卡丘」彩绘 (B787-9)",
-    "B-18101": "中华航空「皮卡丘」彩绘 (A321neo)",
-}
 
 ULTRA_VIP_REGS = {"B-2479", "82-8000", "92-9000", "73-1676", "73-1677", "74-0787", "75-0125"}
 
@@ -334,15 +310,13 @@ def scan_fr24_live_arrivals(now_cst: datetime, forecast_keys: set[str]) -> list[
                     reasons.append("🛩️ 无商业航班号/受限大型专机或公务机")
                     category = category or "VIP_GOV"
 
-                livery_desc = ""
-                if "(" in airline_name:
+                livery_desc = KNOWN_SPECIAL_LIVERIES.get(reg, "")
+                if not livery_desc and "(" in airline_name:
                     s_i = airline_name.find("(") + 1
                     e_i = airline_name.rfind(")")
                     p_txt = (airline_name[s_i:e_i] if e_i > s_i else airline_name[s_i:]).strip()
                     if p_txt and p_txt.lower() not in {"cargo", "express", "regional"}:
                         livery_desc = p_txt
-                elif reg in KNOWN_SPECIAL_LIVERIES:
-                    livery_desc = KNOWN_SPECIAL_LIVERIES[reg]
 
                 already_forecasted = (f"FLTR:{flt}:{reg}" in forecast_keys) if (flt and reg) else (f"FLT:{flt}" in forecast_keys)
                 if livery_desc and is_live and not already_forecasted:
