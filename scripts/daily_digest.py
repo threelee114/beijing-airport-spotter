@@ -287,6 +287,7 @@ def parse_flight(entry: dict, airport_code: str, local_tz: timezone = CST) -> di
 def fetch_airport_for_date(airport_code: str, target_date: datetime) -> dict:
     # First probe page 1 to discover airport's exact lat/lon & timezone offset for local sunrise/sunset
     lat, lon, tz_offset_sec = BEIJING_LAT, BEIJING_LON, 28800
+    icao_code = ""
     airport_name = zh_origin(airport_code.upper())
     local_tz = CST
     start_dt = target_date.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=local_tz)
@@ -318,6 +319,7 @@ def fetch_airport_for_date(airport_code: str, target_date: datetime) -> dict:
                 plugin_data = payload["result"]["response"]["airport"]["pluginData"]
                 if not meta_loaded:
                     details = plugin_data.get("details") or {}
+                    icao_code = ((details.get("code") or {}).get("icao") or "").upper()
                     pos = details.get("position") or {}
                     if pos.get("latitude") is not None and pos.get("longitude") is not None:
                         lat = float(pos["latitude"])
@@ -376,6 +378,7 @@ def fetch_airport_for_date(airport_code: str, target_date: datetime) -> dict:
     flights.sort(key=lambda x: x["arrival_ts"])
     return {
         "airport": airport_code.upper(),
+        "icao": icao_code,
         "airport_name": airport_name,
         "lat": lat,
         "lon": lon,
@@ -599,6 +602,129 @@ def split_by_daylight(items: list[dict], win_start: datetime, win_end: datetime,
 
 def esc(s: str) -> str:
     return html.escape(str(s or ""))
+
+
+# Primary runway axis for popular spotting airports:
+# (heading_A_deg, label_A, heading_B_deg, label_B, calm_default_side 'A' or 'B')
+AIRPORT_RUNWAYS: dict[str, tuple[int, str, int, str, str]] = {
+    "PEK": (0, "向北运行（36L/36R/01，由南向北落）", 180, "向南运行（18L/18R/19，由北向南落）", "A"),
+    "PKX": (355, "向北运行（35L/35R/01L，由南向北落）", 175, "向南运行（17L/17R/19R，由北向南落）", "A"),
+    "PVG": (345, "向北运行（34L/34R/35L/35R，由南向北落）", 165, "向南运行（16L/16R/17L/17R，由北向南落）", "A"),
+    "SHA": (0, "向北运行（36L/36R，由南向北落）", 180, "向南运行（18L/18R，由北向南落）", "A"),
+    "CAN": (20, "向北运行（01/02L/02R，由南向北落）", 200, "向南运行（19/20L/20R，由北向南落）", "A"),
+    "SZX": (335, "向北运行（33/34，由南向北落）", 155, "向南运行（15/16，由北向南落）", "A"),
+    "CTU": (22, "向北运行（02L/02R，由南向北落）", 202, "向南运行（20L/20R，由北向南落）", "A"),
+    "TFU": (10, "向北运行（01/02，由南向北落）", 190, "向南运行（19/20，由北向南落）", "A"),
+    "CKG": (22, "向北运行（02L/02R/03，由南向北落）", 202, "向南运行（20L/20R/21，由北向南落）", "A"),
+    "HKG": (74, "向东北运行（07L/07C/07R，由西向东落）", 254, "向西南运行（25L/25C/25R，由东向西落）", "A"),
+    "HND": (340, "偏北风运行（34L/34R为主）", 160, "偏南风运行（16L/16R或22/23）", "A"),
+    "NRT": (340, "向北运行（34L/34R，由南向北落）", 160, "向南运行（16L/16R，由北向南落）", "A"),
+    "ICN": (335, "向北运行（33/34，由南向北落）", 155, "向南运行（15/16，由北向南落）", "A"),
+}
+
+_CN_DIRS = ["北", "东北", "东", "东南", "南", "西南", "西", "西北"]
+
+
+def deg_to_cn_dir(deg: float) -> str:
+    idx = int(((deg % 360) + 22.5) // 45) % 8
+    return _CN_DIRS[idx]
+
+
+def predict_runway_flow(airport_code: str, wdir: float | None, wspd_kt: float | None) -> str:
+    if wdir is None or wspd_kt is None:
+        return "暂无风向数据"
+    rwy = AIRPORT_RUNWAYS.get(airport_code.upper())
+    if not rwy:
+        if wspd_kt <= 3.0:
+            return "弱风/静风（以塔台实际分配为准）"
+        return f"预计向{deg_to_cn_dir(wdir)}逆风起降"
+    hdg_a, label_a, _hdg_b, label_b, default_side = rwy
+    hw_a = wspd_kt * math.cos(math.radians(wdir - hdg_a))
+    if wspd_kt <= 3.0 or abs(hw_a) < 2.0:
+        pref = label_a if default_side == "A" else label_b
+        return f"弱风/侧风（常规参考：{pref}）"
+    return f"预计{label_a}" if hw_a > 0 else f"预计{label_b}"
+
+
+def _avg_wind_slot(dirs: list, spds: list, idxs: list[int]) -> tuple[float | None, float | None]:
+    ux = uy = s_sum = 0.0
+    n = 0
+    for i in idxs:
+        if i < len(dirs) and i < len(spds) and dirs[i] is not None and spds[i] is not None:
+            d, s = float(dirs[i]), float(spds[i])
+            rad = math.radians(d)
+            ux += s * math.sin(rad)
+            uy += s * math.cos(rad)
+            s_sum += s
+            n += 1
+    if not n:
+        return None, None
+    avg_dir = (math.degrees(math.atan2(ux, uy)) + 360.0) % 360.0
+    return round(avg_dir), round(s_sum / n, 1)
+
+
+def _fmt_wind_item(airport_code: str, wdir: float | None, wspd_kt: float | None) -> dict | None:
+    if wdir is None or wspd_kt is None:
+        return None
+    ms = round(wspd_kt * 0.514444, 1)
+    return {
+        "dir_deg": int(round(wdir)) % 360,
+        "dir_cn": f"{deg_to_cn_dir(wdir)}风",
+        "speed_kt": round(wspd_kt, 1),
+        "speed_ms": ms,
+        "flow": predict_runway_flow(airport_code, wdir, wspd_kt),
+    }
+
+
+def fetch_airport_wind(airport_code: str, icao: str, lat: float, lon: float, date_str: str) -> dict | None:
+    """Fetch official METAR (when available) + Open-Meteo morning/afternoon wind forecast."""
+    result: dict = {"metar": None, "morning": None, "afternoon": None}
+    icao_clean = (icao or "").strip().upper()
+    if icao_clean:
+        try:
+            url = f"https://aviationweather.gov/api/data/metar?ids={urllib.parse.quote(icao_clean)}&format=json"
+            req = urllib.request.Request(url, headers={"User-Agent": "RareAir/1.0"})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                rows = json.loads(resp.read().decode("utf-8"))
+            if isinstance(rows, list) and rows:
+                m = rows[0]
+                wdir = m.get("wdir")
+                wspd = m.get("wspd")
+                if isinstance(wdir, (int, float)) and isinstance(wspd, (int, float)):
+                    item = _fmt_wind_item(airport_code, float(wdir), float(wspd))
+                    if item:
+                        item["raw"] = m.get("rawOb") or ""
+                        result["metar"] = item
+        except Exception:
+            pass
+    try:
+        q = urllib.parse.urlencode({
+            "latitude": f"{lat:.4f}",
+            "longitude": f"{lon:.4f}",
+            "hourly": "wind_speed_10m,wind_direction_10m",
+            "wind_speed_unit": "kn",
+            "timezone": "auto",
+            "start_date": date_str,
+            "end_date": date_str,
+        })
+        req = urllib.request.Request(
+            f"https://api.open-meteo.com/v1/forecast?{q}",
+            headers={"User-Agent": "RareAir/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            om = json.loads(resp.read().decode("utf-8"))
+        hourly = om.get("hourly") or {}
+        dirs = hourly.get("wind_direction_10m") or []
+        spds = hourly.get("wind_speed_10m") or []
+        m_dir, m_spd = _avg_wind_slot(dirs, spds, list(range(7, 12)))
+        a_dir, a_spd = _avg_wind_slot(dirs, spds, list(range(12, 18)))
+        result["morning"] = _fmt_wind_item(airport_code, m_dir, m_spd)
+        result["afternoon"] = _fmt_wind_item(airport_code, a_dir, a_spd)
+    except Exception:
+        pass
+    if not (result["metar"] or result["morning"] or result["afternoon"]):
+        return None
+    return result
 
 
 def fetch_aircraft_photo(reg: str) -> dict | None:
@@ -850,6 +976,7 @@ def build_html(
     scan_stats = []
     livery_stats = []
     c919_parts = []
+    wind_rows = []
 
     for code in codes:
         ap = airports[code]
@@ -859,6 +986,20 @@ def build_html(
         if ap["status"] == "failed":
             scan_stats.append(f"{display_airport} 抓取失败（尝试时间 {checked}）")
             continue
+        wf = ap.get("wind_forecast")
+        if wf:
+            parts = []
+            if wf.get("metar"):
+                m = wf["metar"]
+                parts.append(f"实况METAR：{esc(m['dir_cn'])}{m['dir_deg']}° {m['speed_kt']}kt({m['speed_ms']}m/s) → <strong>{esc(m['flow'])}</strong>")
+            if wf.get("morning"):
+                m = wf["morning"]
+                parts.append(f"上午(07-12时)：{esc(m['dir_cn'])}{m['dir_deg']}° {m['speed_kt']}kt → {esc(m['flow'])}")
+            if wf.get("afternoon"):
+                a = wf["afternoon"]
+                parts.append(f"下午(12-17时)：{esc(a['dir_cn'])}{a['dir_deg']}° {a['speed_kt']}kt → {esc(a['flow'])}")
+            if parts:
+                wind_rows.append(f"<div style=\"margin:3px 0;\"><strong>{esc(ap_name)}：</strong>{' &nbsp;|&nbsp; '.join(parts)}</div>")
         ap_tz = timezone(timedelta(seconds=ap.get("tz_offset_sec", 28800)))
         ap_sr, ap_ss = airport_sunrise_sunset(
             target_dt.replace(tzinfo=ap_tz),
@@ -895,6 +1036,15 @@ def build_html(
     </table>""")
 
     dark_ref = merge_dark_reference(dark_by_airport)
+    wind_html = ""
+    if wind_rows:
+        wind_html = (
+            '<div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:10px 14px;margin:0 0 14px 0;font-size:12px;color:#0c4a6e;">'
+            '<div style="font-weight:700;margin-bottom:4px;">🧭 风向与预计运行方向（选机位参考）</div>'
+            + "".join(wind_rows)
+            + '<div style="color:#64748b;font-size:11px;margin-top:4px;">* 基于风向逆风起降原则推算，仅供参考，实际运行跑道以塔台 / ATIS 为准。</div>'
+            '</div>'
+        )
     changes = summary.get("commercial_changes", [])
     change_html = ""
     if changes:
@@ -917,6 +1067,7 @@ def build_html(
       <strong>当地日出/日落：</strong>{sunrise.strftime('%H:%M')} / {sunset.strftime('%H:%M')}（☀可拍为日出–日落；🌅/🌇为日出前/后 1 小时微光保留 <strong>{win_start.strftime('%H:%M')}–{win_end.strftime('%H:%M')}</strong>，另含 🚨24h直通目标）
     </p>
 
+    {wind_html}
     {change_html}
     {''.join(livery_sections)}
     {''.join(highlight_sections)}
@@ -1043,6 +1194,14 @@ def main() -> int:
         checked_at = datetime.now(CST)
         ap = analyze_flights(raw)
         ap["checked_at_cst"] = checked_at.strftime("%Y-%m-%d %H:%M")
+        if ap["status"] != "failed":
+            ap["wind_forecast"] = fetch_airport_wind(
+                code,
+                raw.get("icao") or "",
+                ap.get("lat", BEIJING_LAT),
+                ap.get("lon", BEIJING_LON),
+                summary["target_date"],
+            )
         observations.update(ap.pop("commercial"))
         summary["airports"][code] = ap
 
