@@ -676,10 +676,17 @@ def _fmt_wind_item(airport_code: str, wdir: float | None, wspd_kt: float | None)
     }
 
 
+AIRPORT_ICAO_FALLBACK: dict[str, str] = {
+    "PEK": "ZBAA", "PKX": "ZBAD", "PVG": "ZSPD", "SHA": "ZSSS",
+    "CAN": "ZGGG", "SZX": "ZGSZ", "CTU": "ZUUU", "TFU": "ZUTF",
+    "CKG": "ZUCK", "HKG": "VHHH", "HND": "RJTT", "NRT": "RJAA", "ICN": "RKSI",
+}
+
+
 def fetch_airport_wind(airport_code: str, icao: str, lat: float, lon: float, date_str: str) -> dict | None:
     """Fetch official METAR (when available) + Open-Meteo morning/afternoon wind forecast."""
     result: dict = {"metar": None, "morning": None, "afternoon": None}
-    icao_clean = (icao or "").strip().upper()
+    icao_clean = (icao or AIRPORT_ICAO_FALLBACK.get(airport_code.upper()) or "").strip().upper()
     if icao_clean:
         try:
             url = f"https://aviationweather.gov/api/data/metar?ids={urllib.parse.quote(icao_clean)}&format=json"
