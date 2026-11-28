@@ -558,8 +558,14 @@ def is_ultra_special(f: dict) -> bool:
     )
 
 
+def fmt_sun_offset(seconds: float) -> str:
+    mins = max(1, round(abs(seconds) / 60.0))
+    h, m = divmod(mins, 60)
+    return f"{h}小时{m:02d}分钟" if h > 0 else f"{m}分钟"
+
+
 def split_by_daylight(items: list[dict], win_start: datetime, win_end: datetime, airport: dict) -> tuple[list[dict], list[dict]]:
-    """Split items into (main_shootable_or_ultra, dark_filtered_reference)."""
+    """Split items into (main_shootable_or_ultra, dark_filtered_reference), labeling true daylight vs twilight."""
     main_list, dark_list = [], []
     for f in items:
         arr_dt = datetime.fromtimestamp(f["arrival_ts"], tz=win_start.tzinfo)
@@ -567,11 +573,27 @@ def split_by_daylight(items: list[dict], win_start: datetime, win_end: datetime,
         if arr_dt.date().isoformat() != airport["date"]:
             sunrise, sunset = airport_sunrise_sunset(arr_dt, airport["lat"], airport["lon"])
             start, end = sunrise - timedelta(hours=1), sunset + timedelta(hours=1)
+        sr = start + timedelta(hours=1)
+        ss = end - timedelta(hours=1)
         shootable = start < arr_dt < end
-        if shootable or is_ultra_special(f):
-            main_list.append({**f, "shootable": shootable})
+        if sr <= arr_dt <= ss:
+            light_kind, light_label = "day", "☀可拍"
+        elif start < arr_dt < sr:
+            light_kind, light_label = "twilight", f"🌅日出前{fmt_sun_offset((sr - arr_dt).total_seconds())}"
+        elif ss < arr_dt < end:
+            light_kind, light_label = "twilight", f"🌇日落后{fmt_sun_offset((arr_dt - ss).total_seconds())}"
         else:
-            dark_list.append(f)
+            light_kind = "dark"
+            light_label = (
+                f"日出前{fmt_sun_offset((sr - arr_dt).total_seconds())}"
+                if arr_dt <= start
+                else f"日落后{fmt_sun_offset((arr_dt - ss).total_seconds())}"
+            )
+        enriched = {**f, "shootable": shootable, "light_kind": light_kind, "light_label": light_label}
+        if shootable or is_ultra_special(f):
+            main_list.append(enriched)
+        else:
+            dark_list.append(enriched)
     return main_list, dark_list
 
 
@@ -590,6 +612,9 @@ def render_rows(items: list[dict], empty_msg: str, muted: bool = False) -> str:
         elif not f["shootable"]:
             bg = "#fef2f2"
             tag = ' <span style="font-size:11px;color:#b91c1c;">🚨直通</span>'
+        elif f.get("light_kind") == "twilight":
+            bg = "#f0f9ff"
+            tag = f' <span style="font-size:11px;color:#0369a1;">{esc(f.get("light_label") or "微光")}</span>'
         else:
             bg = "#fefce8"
             tag = ' <span style="font-size:11px;color:#b45309;">☀可拍</span>'
@@ -752,7 +777,7 @@ def build_html(summary: dict, target_dt: datetime, edition_label: str = "次日�
     <p style="margin:6px 0 16px 0;color:#475569;font-size:13px;">
       <strong>目标日期：</strong>{summary['target_date']}（当地时间） &nbsp;|&nbsp;
       <strong>本次抓取（北京时间）：</strong>{' / '.join(scan_stats)} &nbsp;|&nbsp;
-      <strong>当地日出/日落：</strong>{sunrise.strftime('%H:%M')} / {sunset.strftime('%H:%M')}（主区仅展示可拍窗口 <strong>{win_start.strftime('%H:%M')}–{win_end.strftime('%H:%M')}</strong> 及 🚨24h直通目标）
+      <strong>当地日出/日落：</strong>{sunrise.strftime('%H:%M')} / {sunset.strftime('%H:%M')}（☀可拍为日出–日落；🌅/🌇为日出前/后 1 小时微光保留 <strong>{win_start.strftime('%H:%M')}–{win_end.strftime('%H:%M')}</strong>，另含 🚨24h直通目标）
     </p>
 
     {change_html}
