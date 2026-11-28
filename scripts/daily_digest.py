@@ -651,14 +651,29 @@ def fetch_aircraft_photo(reg: str) -> dict | None:
     return None
 
 
-def prefetch_livery_photos(summary: dict, max_workers: int = 4) -> dict[str, dict]:
-    """Prefetch sample photos for deduplicated registrations in special_liveries."""
+def prefetch_livery_photos(summary: dict, target_dt: datetime | None = None, max_workers: int = 4) -> dict[str, dict]:
+    """Prefetch sample photos for deduplicated registrations in shootable/ultra liveries & highlights."""
     from concurrent.futures import ThreadPoolExecutor
 
     regs = []
     seen = set()
     for ap in (summary.get("airports") or {}).values():
-        for f in ap.get("special_liveries") or []:
+        if ap.get("status") == "failed":
+            continue
+        if target_dt is not None:
+            ap_tz = timezone(timedelta(seconds=ap.get("tz_offset_sec", 28800)))
+            ap_sr, ap_ss = airport_sunrise_sunset(
+                target_dt.replace(tzinfo=ap_tz),
+                ap.get("lat", BEIJING_LAT),
+                ap.get("lon", BEIJING_LON),
+            )
+            ap_ws, ap_we = ap_sr - timedelta(hours=1), ap_ss + timedelta(hours=1)
+            liv_main, _ = split_by_daylight(ap.get("special_liveries") or [], ap_ws, ap_we, ap)
+            hi_main, _ = split_by_daylight(merge_highlights(ap), ap_ws, ap_we, ap)
+            candidates = liv_main + hi_main
+        else:
+            candidates = list(ap.get("special_liveries") or []) + merge_highlights(ap)
+        for f in candidates:
             r = (f.get("registration") or "").strip().upper()
             if r and r not in seen:
                 seen.add(r)
@@ -807,6 +822,17 @@ def build_html(
           <th style="border:1px solid #f5d0fe;padding:7px;text-align:center;width:152px;">彩绘样张</th>
         </tr>
       </thead>"""
+    thead_highlight = """
+      <thead>
+        <tr style="background-color:#f1f5f9;color:#0f172a;">
+          <th style="border:1px solid #cbd5e1;padding:7px;text-align:left;width:86px;">预计到达</th>
+          <th style="border:1px solid #cbd5e1;padding:7px;text-align:left;width:88px;">航班号</th>
+          <th style="border:1px solid #cbd5e1;padding:7px;text-align:left;">航司 / 出发地</th>
+          <th style="border:1px solid #cbd5e1;padding:7px;text-align:left;">机型 / 注册号</th>
+          <th style="border:1px solid #cbd5e1;padding:7px;text-align:left;">亮点说明</th>
+          <th style="border:1px solid #cbd5e1;padding:7px;text-align:center;width:152px;">参考样张</th>
+        </tr>
+      </thead>"""
     thead_std = """
       <thead>
         <tr style="background-color:#f1f5f9;color:#0f172a;">
@@ -864,8 +890,8 @@ def build_html(
         highlight_sections.append(f"""
     <h3 style="margin:18px 0 8px 0;color:#0f172a;">🛬 {esc(ap_name)} 专机 / 特殊机型 / 罕见航司（{len(hi_main)} 班）</h3>
     <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:18px;">
-      {thead_std}
-      <tbody>{render_rows(hi_main, f'可拍时段内 {code} 暂无额外特殊机型或低频航司')}</tbody>
+      {thead_highlight}
+      <tbody>{render_rows(hi_main, f'可拍时段内 {code} 暂无额外特殊机型或低频航司', show_photo=True, photo_map=photo_map)}</tbody>
     </table>""")
 
     dark_ref = merge_dark_reference(dark_by_airport)
@@ -1095,7 +1121,7 @@ def main() -> int:
             print("DIFF_ONLY: No new shootable or ultra-special arrivals found. Skipping email.")
             return 0
 
-    photo_map = prefetch_livery_photos(render_summary)
+    photo_map = prefetch_livery_photos(render_summary, target_dt=target_dt)
     html_body = build_html(render_summary, target_dt, edition_label=edition_label, photo_map=photo_map)
     if args.html_out:
         os.makedirs(os.path.dirname(os.path.abspath(args.html_out)), exist_ok=True)
