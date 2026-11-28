@@ -601,9 +601,88 @@ def esc(s: str) -> str:
     return html.escape(str(s or ""))
 
 
-def render_rows(items: list[dict], empty_msg: str, muted: bool = False) -> str:
+def fetch_aircraft_photo(reg: str) -> dict | None:
+    """Fetch latest aircraft livery sample photo (primary: FR24/JetPhotos, fallback: Airport-Data)."""
+    reg_clean = (reg or "").strip().upper()
+    if not reg_clean:
+        return None
+    # 1. Primary: FR24 aircraft flight list (returns official JetPhotos CDN thumbnails & credits)
+    try:
+        q = urllib.parse.urlencode({"query": reg_clean, "fetchBy": "reg", "page": "1", "limit": "1"})
+        req = urllib.request.Request(
+            f"https://api.flightradar24.com/common/v1/flight/list.json?{q}",
+            headers=HEADERS,
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+        ac_images = (payload.get("result") or {}).get("response", {}).get("aircraftImages") or []
+        for entry in ac_images:
+            imgs = entry.get("images") or {}
+            cand = (imgs.get("medium") or imgs.get("thumbnails") or [None])[0]
+            if cand and cand.get("src"):
+                return {
+                    "src": cand["src"],
+                    "link": cand.get("link") or f"https://www.jetphotos.com/registration/{urllib.parse.quote(reg_clean)}",
+                    "copyright": cand.get("copyright") or "",
+                    "source": "JetPhotos",
+                }
+    except Exception:
+        pass
+
+    # 2. Fallback: Airport-Data public thumbnail API
+    try:
+        q = urllib.parse.urlencode({"r": reg_clean, "n": "1"})
+        req = urllib.request.Request(
+            f"https://airport-data.com/api/ac_thumb.json?{q}",
+            headers={"User-Agent": HEADERS["User-Agent"], "Accept": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+        item = (payload.get("data") or [None])[0]
+        if item and item.get("image"):
+            return {
+                "src": item["image"],
+                "link": item.get("link") or f"https://www.jetphotos.com/registration/{urllib.parse.quote(reg_clean)}",
+                "copyright": item.get("photographer") or "",
+                "source": "Airport-Data",
+            }
+    except Exception:
+        pass
+    return None
+
+
+def prefetch_livery_photos(summary: dict, max_workers: int = 4) -> dict[str, dict]:
+    """Prefetch sample photos for deduplicated registrations in special_liveries."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    regs = []
+    seen = set()
+    for ap in (summary.get("airports") or {}).values():
+        for f in ap.get("special_liveries") or []:
+            r = (f.get("registration") or "").strip().upper()
+            if r and r not in seen:
+                seen.add(r)
+                regs.append(r)
+    if not regs:
+        return {}
+    photo_map: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(regs))) as pool:
+        for reg, photo in zip(regs, pool.map(fetch_aircraft_photo, regs)):
+            if photo:
+                photo_map[reg] = photo
+    return photo_map
+
+
+def render_rows(
+    items: list[dict],
+    empty_msg: str,
+    muted: bool = False,
+    show_photo: bool = False,
+    photo_map: dict[str, dict] | None = None,
+) -> str:
+    colspan = 6 if show_photo else 5
     if not items:
-        return f'<tr><td colspan="5" style="border:1px solid #e2e8f0;padding:10px;color:#64748b;text-align:center;">{esc(empty_msg)}</td></tr>'
+        return f'<tr><td colspan="{colspan}" style="border:1px solid #e2e8f0;padding:10px;color:#64748b;text-align:center;">{esc(empty_msg)}</td></tr>'
     out = []
     for f in items:
         if muted:
@@ -619,7 +698,8 @@ def render_rows(items: list[dict], empty_msg: str, muted: bool = False) -> str:
             bg = "#fefce8"
             tag = ' <span style="font-size:11px;color:#b45309;">☀可拍</span>'
         flt = f["flight_number"] or f["callsign"] or "N/A"
-        reg_html = f'<br><span style="color:#2563eb;">{esc(f["registration"])}</span>' if f["registration"] else ""
+        reg = (f.get("registration") or "").strip().upper()
+        reg_html = f'<br><span style="color:#2563eb;">{esc(reg)}</span>' if reg else ""
         ac_disp = zh_aircraft(f["aircraft_text"], f["aircraft_code"])
         airline_disp = zh_airline(f["airline"], f["airline_iata"], f["owner"])
         orig_disp = zh_origin(f["origin_iata"], f["origin_city"], f["origin_country"])
@@ -628,13 +708,38 @@ def render_rows(items: list[dict], empty_msg: str, muted: bool = False) -> str:
             planned = f'<br><small>原定 {esc(f["scheduled_time"])}</small>'
         elif not f.get("estimated_ts"):
             planned = " <small>计划</small>"
+        photo_td = ""
+        if show_photo:
+            photo = (photo_map or {}).get(reg) if reg else None
+            if photo and photo.get("src"):
+                credit = esc(photo.get("copyright") or "")
+                source = esc(photo.get("source") or "JetPhotos")
+                credit_txt = f"© {credit} · {source}" if credit else source
+                photo_td = (
+                    '<td style="border:1px solid #e2e8f0;padding:6px;text-align:center;vertical-align:middle;width:152px;">'
+                    f'<a href="{esc(photo["link"])}" target="_blank" style="text-decoration:none;">'
+                    f'<img src="{esc(photo["src"])}" width="140" alt="{esc(reg)}" '
+                    'style="width:140px;height:90px;object-fit:cover;border-radius:6px;border:1px solid #e2e8f0;display:block;margin:0 auto;">'
+                    '</a>'
+                    f'<div style="font-size:10px;color:#64748b;margin-top:3px;line-height:1.2;">{credit_txt}</div>'
+                    '</td>'
+                )
+            elif reg:
+                jp_url = f"https://www.jetphotos.com/registration/{urllib.parse.quote(reg)}"
+                photo_td = (
+                    '<td style="border:1px solid #e2e8f0;padding:6px;text-align:center;vertical-align:middle;width:152px;">'
+                    f'<a href="{esc(jp_url)}" target="_blank" style="font-size:11px;color:#2563eb;text-decoration:none;">JetPhotos 查看→</a>'
+                    '</td>'
+                )
+            else:
+                photo_td = '<td style="border:1px solid #e2e8f0;padding:6px;text-align:center;vertical-align:middle;width:152px;color:#94a3b8;font-size:11px;">待排机</td>'
         out.append(f"""
         <tr style="background-color:{bg};">
           <td style="border:1px solid #e2e8f0;padding:7px;white-space:nowrap;"><strong>{esc(f['arrival_time'])}</strong>{tag}{planned}</td>
           <td style="border:1px solid #e2e8f0;padding:7px;"><strong>{esc(flt)}</strong></td>
           <td style="border:1px solid #e2e8f0;padding:7px;">{esc(airline_disp)}<br><span style="color:#64748b;font-size:12px;">{esc(orig_disp)}</span></td>
           <td style="border:1px solid #e2e8f0;padding:7px;">{esc(ac_disp)}{reg_html}</td>
-          <td style="border:1px solid #e2e8f0;padding:7px;">{'<br>'.join(esc(r) for r in f['reasons'])}</td>
+          <td style="border:1px solid #e2e8f0;padding:7px;">{'<br>'.join(esc(r) for r in f['reasons'])}</td>{photo_td}
         </tr>""")
     return "".join(out)
 
@@ -673,7 +778,12 @@ def merge_dark_reference(dark_by_airport: list[tuple[str, list[dict]]]) -> list[
     return sorted(merged.values(), key=lambda x: x["arrival_ts"])
 
 
-def build_html(summary: dict, target_dt: datetime, edition_label: str = "次日亮点与彩绘到港汇总") -> str:
+def build_html(
+    summary: dict,
+    target_dt: datetime,
+    edition_label: str = "次日亮点与彩绘到港汇总",
+    photo_map: dict[str, dict] | None = None,
+) -> str:
     airports = summary["airports"]
     codes = list(airports.keys())
     first_ap = next(ap for ap in airports.values() if ap["status"] != "failed")
@@ -694,6 +804,7 @@ def build_html(summary: dict, target_dt: datetime, edition_label: str = "次日�
           <th style="border:1px solid #f5d0fe;padding:7px;text-align:left;">航司 / 出发地</th>
           <th style="border:1px solid #f5d0fe;padding:7px;text-align:left;">机型 / 注册号</th>
           <th style="border:1px solid #f5d0fe;padding:7px;text-align:left;">彩绘 / 涂装主题</th>
+          <th style="border:1px solid #f5d0fe;padding:7px;text-align:center;width:152px;">彩绘样张</th>
         </tr>
       </thead>"""
     thead_std = """
@@ -747,7 +858,7 @@ def build_html(summary: dict, target_dt: datetime, edition_label: str = "次日�
     <h3 style="margin:14px 0 6px 0;color:#0f172a;">🎨 {esc(ap_name)} 可拍时段彩绘（{len(liv_main)} 班）</h3>
     <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:14px;">
       {thead_livery}
-      <tbody>{render_rows(liv_main, f'可拍时段内暂未检出已排机 {code} 彩绘')}</tbody>
+      <tbody>{render_rows(liv_main, f'可拍时段内暂未检出已排机 {code} 彩绘', show_photo=True, photo_map=photo_map)}</tbody>
     </table>""")
 
         highlight_sections.append(f"""
@@ -769,7 +880,7 @@ def build_html(summary: dict, target_dt: datetime, edition_label: str = "次日�
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head><meta charset="utf-8"><title>机场({title_codes}){edition_label} - {summary['target_date']}</title></head>
-<body style="font-family:'Microsoft YaHei','PingFang SC',Arial,sans-serif;color:#1f2937;line-height:1.6;max-width:860px;margin:0 auto;padding:18px;background:#f8fafc;">
+<body style="font-family:'Microsoft YaHei','PingFang SC',Arial,sans-serif;color:#1f2937;line-height:1.6;max-width:960px;margin:0 auto;padding:18px;background:#f8fafc;">
   <div style="background:#ffffff;border-radius:10px;padding:24px;border:1px solid #e2e8f0;">
     <h2 style="margin:0 0 8px 0;color:#0f172a;border-bottom:2px solid #2563eb;padding-bottom:10px;">
       ✈️ 机场（{esc(title_codes)}）{esc(edition_label)}
@@ -984,7 +1095,8 @@ def main() -> int:
             print("DIFF_ONLY: No new shootable or ultra-special arrivals found. Skipping email.")
             return 0
 
-    html_body = build_html(render_summary, target_dt, edition_label=edition_label)
+    photo_map = prefetch_livery_photos(render_summary)
+    html_body = build_html(render_summary, target_dt, edition_label=edition_label, photo_map=photo_map)
     if args.html_out:
         os.makedirs(os.path.dirname(os.path.abspath(args.html_out)), exist_ok=True)
         with open(args.html_out, "w", encoding="utf-8") as fh:
